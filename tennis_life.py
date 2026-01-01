@@ -1,16 +1,210 @@
 """
-🎾 TENNIS LIFE - 网球人生 v3.0
-球友自助入组 + 匿名/实名吐槽
-Mobile-optimized version
+🎾 TENNIS LIFE - 网球人生 v5.0
+Google Sheets 持久化存储版本
+Mobile-optimized
 """
 
 import streamlit as st
 import random
-from datetime import datetime
+from datetime import datetime, date
 import json
 
 # ═══════════════════════════════════════════════════════════════════
-# 🎨 PAGE CONFIG & CUSTOM STYLING
+# 📊 GOOGLE SHEETS SETUP
+# ═══════════════════════════════════════════════════════════════════
+
+try:
+    from google.oauth2.service_account import Credentials
+    import gspread
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+
+# Google Sheets 配置
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
+@st.cache_resource
+def get_google_sheet():
+    """连接 Google Sheets"""
+    if not GSPREAD_AVAILABLE:
+        return None
+    
+    try:
+        # 从 Streamlit Secrets 读取凭证
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        
+        # 打开指定的 Google Sheet
+        sheet_url = st.secrets["sheet_url"]
+        spreadsheet = client.open_by_url(sheet_url)
+        return spreadsheet
+    except Exception as e:
+        st.error(f"连接 Google Sheets 失败: {e}")
+        return None
+
+def init_worksheets(spreadsheet):
+    """初始化工作表"""
+    if not spreadsheet:
+        return None, None, None
+    
+    try:
+        # 获取或创建工作表
+        worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
+        
+        # Players 表
+        if "players" not in worksheet_names:
+            players_ws = spreadsheet.add_worksheet(title="players", rows=1000, cols=10)
+            players_ws.append_row(["name", "rating", "group", "created_at"])
+        else:
+            players_ws = spreadsheet.worksheet("players")
+        
+        # Match Records 表
+        if "matches" not in worksheet_names:
+            matches_ws = spreadsheet.add_worksheet(title="matches", rows=1000, cols=15)
+            matches_ws.append_row(["date", "team1", "team2", "score1", "score2", "net_diff", "winner", "created_at"])
+        else:
+            matches_ws = spreadsheet.worksheet("matches")
+        
+        # Reviews 表
+        if "reviews" not in worksheet_names:
+            reviews_ws = spreadsheet.add_worksheet(title="reviews", rows=1000, cols=10)
+            reviews_ws.append_row(["date", "author", "is_anonymous", "type", "target", "content"])
+        else:
+            reviews_ws = spreadsheet.worksheet("reviews")
+        
+        return players_ws, matches_ws, reviews_ws
+    except Exception as e:
+        st.error(f"初始化工作表失败: {e}")
+        return None, None, None
+
+def load_players(ws):
+    """从 Google Sheets 加载球员"""
+    if not ws:
+        return [], [], []
+    try:
+        records = ws.get_all_records()
+        players = []
+        group_a = []
+        group_b = []
+        for r in records:
+            if r.get('name'):
+                player = {
+                    "name": r['name'],
+                    "rating": float(r['rating']) if r.get('rating') else 3.5,
+                    "group": r.get('group', 'B')
+                }
+                players.append(player)
+                if player['group'] == 'A':
+                    group_a.append(player)
+                else:
+                    group_b.append(player)
+        return players, group_a, group_b
+    except:
+        return [], [], []
+
+def add_player(ws, player):
+    """添加球员到 Google Sheets"""
+    if not ws:
+        return False
+    try:
+        ws.append_row([
+            player['name'],
+            player['rating'],
+            player['group'],
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ])
+        return True
+    except:
+        return False
+
+def load_matches(ws):
+    """从 Google Sheets 加载战绩"""
+    if not ws:
+        return []
+    try:
+        records = ws.get_all_records()
+        matches = []
+        for r in records:
+            if r.get('date'):
+                match = {
+                    "date": r['date'],
+                    "team1": r['team1'].split(',') if r.get('team1') else [],
+                    "team2": r['team2'].split(',') if r.get('team2') else [],
+                    "score1": int(r['score1']) if r.get('score1') else 0,
+                    "score2": int(r['score2']) if r.get('score2') else 0,
+                    "net_diff": int(r['net_diff']) if r.get('net_diff') else 0,
+                    "winner": r.get('winner', 'tie')
+                }
+                matches.append(match)
+        return matches
+    except:
+        return []
+
+def add_match(ws, match):
+    """添加战绩到 Google Sheets"""
+    if not ws:
+        return False
+    try:
+        ws.append_row([
+            match['date'],
+            ','.join(match['team1']),
+            ','.join(match['team2']),
+            match['score1'],
+            match['score2'],
+            match['net_diff'],
+            match['winner'],
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ])
+        return True
+    except:
+        return False
+
+def load_reviews(ws):
+    """从 Google Sheets 加载吐槽"""
+    if not ws:
+        return []
+    try:
+        records = ws.get_all_records()
+        reviews = []
+        for r in records:
+            if r.get('content'):
+                review = {
+                    "date": r.get('date', ''),
+                    "author": r.get('author', '匿名'),
+                    "is_anonymous": r.get('is_anonymous', 'FALSE') == 'TRUE',
+                    "type": r.get('type', ''),
+                    "target": r.get('target', ''),
+                    "content": r.get('content', '')
+                }
+                reviews.append(review)
+        return reviews
+    except:
+        return []
+
+def add_review(ws, review):
+    """添加吐槽到 Google Sheets"""
+    if not ws:
+        return False
+    try:
+        ws.append_row([
+            review['date'],
+            review['author'],
+            'TRUE' if review['is_anonymous'] else 'FALSE',
+            review['type'],
+            review['target'],
+            review['content']
+        ])
+        return True
+    except:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🎨 PAGE CONFIG & STYLING
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
@@ -20,12 +214,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@400;500;600;700&display=swap');
     
-    /* Main background */
     .stApp {
         background: linear-gradient(135deg, #0a1628 0%, #1a3a52 50%, #0d2137 100%);
     }
@@ -33,10 +225,6 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
-    /* ═══════════════════════════════════════════════════════════════
-       TYPOGRAPHY
-    ═══════════════════════════════════════════════════════════════ */
     
     .main-title {
         font-family: 'Orbitron', monospace;
@@ -48,7 +236,6 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         background-clip: text;
         margin-bottom: 0;
-        letter-spacing: 0.05em;
         filter: drop-shadow(0 0 20px rgba(0, 255, 136, 0.4));
     }
     
@@ -59,15 +246,10 @@ st.markdown("""
         color: #88ccff;
         margin-top: 5px;
         letter-spacing: 0.3em;
-        text-transform: uppercase;
     }
     
-    /* ═══════════════════════════════════════════════════════════════
-       TAB STYLING - HIGH VISIBILITY
-    ═══════════════════════════════════════════════════════════════ */
-    
     .stTabs [data-baseweb="tab-list"] {
-        gap: 0px;
+        gap: 0;
         background: rgba(0, 0, 0, 0.3);
         border-radius: 15px;
         padding: 5px;
@@ -77,14 +259,13 @@ st.markdown("""
     
     .stTabs [data-baseweb="tab"] {
         font-family: 'Rajdhani', sans-serif !important;
-        font-size: clamp(0.8rem, 2.8vw, 1rem) !important;
+        font-size: clamp(0.7rem, 2.5vw, 0.9rem) !important;
         font-weight: 700 !important;
         color: #ffffff !important;
         background: transparent !important;
         border-radius: 10px !important;
-        padding: 10px 12px !important;
-        margin: 3px !important;
-        white-space: nowrap;
+        padding: 8px 8px !important;
+        margin: 2px !important;
         border: none !important;
     }
     
@@ -92,21 +273,11 @@ st.markdown("""
         background: linear-gradient(135deg, rgba(0, 212, 255, 0.3), rgba(0, 255, 136, 0.2)) !important;
         color: #00ffcc !important;
         border: 1px solid rgba(0, 255, 136, 0.5) !important;
-        text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
     }
     
     .stTabs [data-baseweb="tab"]:hover {
         background: rgba(0, 212, 255, 0.15) !important;
-        color: #00d4ff !important;
     }
-    
-    .stTabs [data-baseweb="tab-panel"] {
-        padding-top: 20px;
-    }
-    
-    /* ═══════════════════════════════════════════════════════════════
-       CARDS
-    ═══════════════════════════════════════════════════════════════ */
     
     .team-card {
         background: linear-gradient(145deg, rgba(0, 255, 136, 0.1), rgba(0, 212, 255, 0.05));
@@ -114,7 +285,6 @@ st.markdown("""
         border-radius: 15px;
         padding: 15px;
         margin: 10px 0;
-        backdrop-filter: blur(10px);
         box-shadow: 0 8px 32px rgba(0, 255, 136, 0.2);
     }
     
@@ -124,23 +294,18 @@ st.markdown("""
         box-shadow: 0 8px 32px rgba(255, 107, 53, 0.2);
     }
     
-    /* Registration card - special highlight */
     .register-card {
         background: linear-gradient(145deg, rgba(0, 212, 255, 0.15), rgba(138, 43, 226, 0.1));
         border: 2px solid rgba(0, 212, 255, 0.5);
         border-radius: 20px;
-        padding: 25px;
+        padding: 20px;
         margin: 15px 0;
         box-shadow: 0 10px 40px rgba(0, 212, 255, 0.3);
     }
     
-    /* ═══════════════════════════════════════════════════════════════
-       PLAYER NAMES
-    ═══════════════════════════════════════════════════════════════ */
-    
     .player-name {
         font-family: 'Orbitron', monospace;
-        font-size: clamp(1.1rem, 4.5vw, 1.6rem);
+        font-size: clamp(1rem, 4vw, 1.5rem);
         font-weight: 700;
         color: #00ff88;
         text-shadow: 0 0 15px rgba(0, 255, 136, 0.5);
@@ -163,61 +328,54 @@ st.markdown("""
         border-left: 4px solid #00ff88;
     }
     
-    .player-item-b {
-        border-left-color: #ff6b35;
-    }
+    .player-item-b { border-left-color: #ff6b35; }
     
     .player-item-name {
         font-family: 'Rajdhani', sans-serif;
-        font-size: 1.2rem;
+        font-size: 1.1rem;
         font-weight: 600;
         color: #ffffff;
     }
     
     .player-item-rating {
         font-family: 'Orbitron', monospace;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         color: #00d4ff;
         background: rgba(0, 212, 255, 0.2);
-        padding: 4px 12px;
+        padding: 4px 10px;
         border-radius: 20px;
     }
     
-    /* Group labels */
     .group-label {
         font-family: 'Orbitron', monospace;
-        font-size: clamp(1.5rem, 6vw, 2.5rem);
+        font-size: clamp(1.3rem, 5vw, 2rem);
         font-weight: 900;
         display: inline-block;
-        padding: 8px 20px;
+        padding: 6px 16px;
         border-radius: 50px;
-        margin-bottom: 15px;
+        margin-bottom: 10px;
     }
     
     .group-a {
         background: linear-gradient(135deg, #00ff88, #00d4ff);
         color: #0a1628;
-        box-shadow: 0 0 25px rgba(0, 255, 136, 0.5);
+        box-shadow: 0 0 20px rgba(0, 255, 136, 0.5);
     }
     
     .group-b {
         background: linear-gradient(135deg, #ff6b35, #ffc107);
         color: #0a1628;
-        box-shadow: 0 0 25px rgba(255, 107, 53, 0.5);
+        box-shadow: 0 0 20px rgba(255, 107, 53, 0.5);
     }
-    
-    /* ═══════════════════════════════════════════════════════════════
-       VS BADGE
-    ═══════════════════════════════════════════════════════════════ */
     
     .vs-badge {
         font-family: 'Orbitron', monospace;
-        font-size: clamp(1.5rem, 6vw, 3rem);
+        font-size: clamp(1.5rem, 6vw, 2.5rem);
         font-weight: 900;
         color: #fff;
         text-shadow: 0 0 30px rgba(255, 255, 255, 0.8);
         text-align: center;
-        padding: 15px;
+        padding: 10px;
         animation: pulse 1.5s ease-in-out infinite;
     }
     
@@ -228,7 +386,7 @@ st.markdown("""
     
     .team-label {
         font-family: 'Rajdhani', sans-serif;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         color: #88ccff;
         text-transform: uppercase;
         letter-spacing: 0.2em;
@@ -236,16 +394,12 @@ st.markdown("""
         text-align: center;
     }
     
-    /* ═══════════════════════════════════════════════════════════════
-       DATE & SECTION HEADERS
-    ═══════════════════════════════════════════════════════════════ */
-    
     .date-badge {
         font-family: 'Orbitron', monospace;
-        font-size: clamp(0.9rem, 3vw, 1.2rem);
+        font-size: clamp(0.8rem, 2.5vw, 1rem);
         color: #00d4ff;
         background: rgba(0, 212, 255, 0.1);
-        padding: 8px 20px;
+        padding: 6px 16px;
         border-radius: 50px;
         border: 1px solid rgba(0, 212, 255, 0.3);
         display: inline-block;
@@ -254,26 +408,22 @@ st.markdown("""
     
     .section-header {
         font-family: 'Orbitron', monospace;
-        font-size: clamp(1.2rem, 5vw, 1.8rem);
+        font-size: clamp(1.1rem, 4.5vw, 1.6rem);
         font-weight: 700;
         color: #00ffcc;
         border-bottom: 2px solid rgba(0, 255, 136, 0.4);
-        padding-bottom: 10px;
-        margin: 25px 0 15px 0;
+        padding-bottom: 8px;
+        margin: 20px 0 12px 0;
         text-shadow: 0 0 10px rgba(0, 255, 136, 0.3);
     }
     
     .sub-header {
         font-family: 'Rajdhani', sans-serif;
-        font-size: clamp(1rem, 4vw, 1.3rem);
+        font-size: clamp(0.95rem, 3.5vw, 1.2rem);
         font-weight: 600;
         color: #88ccff;
-        margin: 15px 0 10px 0;
+        margin: 12px 0 8px 0;
     }
-    
-    /* ═══════════════════════════════════════════════════════════════
-       FORM ELEMENTS
-    ═══════════════════════════════════════════════════════════════ */
     
     .stTextInput input {
         background: rgba(0, 0, 0, 0.4) !important;
@@ -281,18 +431,14 @@ st.markdown("""
         border-radius: 12px !important;
         color: #ffffff !important;
         font-family: 'Rajdhani', sans-serif !important;
-        font-size: 1.1rem !important;
-        padding: 12px !important;
-        min-height: 50px !important;
+        font-size: 1rem !important;
+        padding: 10px !important;
+        min-height: 45px !important;
     }
     
     .stTextInput input:focus {
         border-color: #00ff88 !important;
         box-shadow: 0 0 15px rgba(0, 255, 136, 0.3) !important;
-    }
-    
-    .stTextInput input::placeholder {
-        color: rgba(255, 255, 255, 0.5) !important;
     }
     
     .stTextArea textarea {
@@ -301,50 +447,40 @@ st.markdown("""
         border-radius: 12px !important;
         color: #ffffff !important;
         font-family: 'Rajdhani', sans-serif !important;
-        font-size: 1.1rem !important;
-        padding: 12px !important;
-    }
-    
-    .stTextArea textarea:focus {
-        border-color: #00ff88 !important;
-        box-shadow: 0 0 15px rgba(0, 255, 136, 0.3) !important;
+        font-size: 1rem !important;
+        padding: 10px !important;
     }
     
     .stSelectbox > div > div {
         background: rgba(0, 0, 0, 0.4) !important;
         border: 2px solid rgba(0, 212, 255, 0.4) !important;
         border-radius: 12px !important;
-        color: #ffffff !important;
-        min-height: 50px !important;
+        min-height: 45px !important;
+    }
+    
+    .stDateInput > div > div {
+        background: rgba(0, 0, 0, 0.4) !important;
+        border: 2px solid rgba(0, 212, 255, 0.4) !important;
+        border-radius: 12px !important;
     }
     
     .stRadio > div {
         background: rgba(0, 0, 0, 0.2) !important;
         border-radius: 12px !important;
-        padding: 10px !important;
+        padding: 8px !important;
     }
     
-    .stRadio label {
+    .stRadio label, .stCheckbox label {
         color: #ffffff !important;
         font-family: 'Rajdhani', sans-serif !important;
         font-weight: 600 !important;
     }
     
-    .stCheckbox label {
-        color: #ffffff !important;
-        font-family: 'Rajdhani', sans-serif !important;
-    }
-    
-    .stTextInput label, .stTextArea label, .stSelectbox label {
+    .stTextInput label, .stTextArea label, .stSelectbox label, .stDateInput label {
         color: #ffffff !important;
         font-family: 'Rajdhani', sans-serif !important;
         font-weight: 600 !important;
-        font-size: 1rem !important;
     }
-    
-    /* ═══════════════════════════════════════════════════════════════
-       BUTTONS
-    ═══════════════════════════════════════════════════════════════ */
     
     .stButton > button {
         font-family: 'Orbitron', monospace !important;
@@ -353,11 +489,10 @@ st.markdown("""
         color: #0a1628 !important;
         border: none !important;
         border-radius: 50px !important;
-        padding: 15px 30px !important;
-        font-size: clamp(0.9rem, 3.5vw, 1.1rem) !important;
-        min-height: 55px !important;
+        padding: 12px 25px !important;
+        font-size: clamp(0.85rem, 3vw, 1rem) !important;
+        min-height: 50px !important;
         box-shadow: 0 5px 20px rgba(0, 255, 136, 0.4) !important;
-        transition: all 0.3s ease !important;
         width: 100%;
     }
     
@@ -366,176 +501,149 @@ st.markdown("""
         box-shadow: 0 8px 25px rgba(0, 255, 136, 0.6) !important;
     }
     
-    /* ═══════════════════════════════════════════════════════════════
-       EXPANDER
-    ═══════════════════════════════════════════════════════════════ */
-    
     .streamlit-expanderHeader {
         background: rgba(0, 0, 0, 0.3) !important;
         border-radius: 10px !important;
         color: #ffffff !important;
         font-family: 'Rajdhani', sans-serif !important;
-        font-weight: 600 !important;
     }
     
     .streamlit-expanderContent {
         background: rgba(0, 0, 0, 0.2) !important;
         border-radius: 0 0 10px 10px !important;
-        color: #ffffff !important;
     }
-    
-    /* ═══════════════════════════════════════════════════════════════
-       ROAST CARDS
-    ═══════════════════════════════════════════════════════════════ */
     
     .roast-card {
         background: linear-gradient(145deg, rgba(255, 107, 53, 0.1), rgba(255, 193, 7, 0.05));
         border: 1px solid rgba(255, 107, 53, 0.3);
         border-radius: 15px;
-        padding: 15px;
-        margin: 10px 0;
+        padding: 12px;
+        margin: 8px 0;
     }
     
     .roast-author {
         font-family: 'Orbitron', monospace;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         color: #ff6b35;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
     }
     
     .roast-content {
         font-family: 'Rajdhani', sans-serif;
-        font-size: 1.1rem;
+        font-size: 1rem;
         color: #ffffff;
-        line-height: 1.5;
+        line-height: 1.4;
     }
     
     .roast-time {
         font-family: 'Rajdhani', sans-serif;
-        font-size: 0.8rem;
+        font-size: 0.75rem;
         color: #888;
-        margin-top: 8px;
+        margin-top: 6px;
     }
     
-    /* Anonymous badge */
     .anon-badge {
         background: rgba(138, 43, 226, 0.3);
         color: #da70d6;
-        padding: 2px 10px;
+        padding: 2px 8px;
         border-radius: 10px;
+        font-size: 0.75rem;
+        margin-left: 8px;
+    }
+    
+    .match-card {
+        background: linear-gradient(145deg, rgba(0, 212, 255, 0.1), rgba(0, 255, 136, 0.05));
+        border: 1px solid rgba(0, 212, 255, 0.3);
+        border-radius: 15px;
+        padding: 12px;
+        margin: 8px 0;
+    }
+    
+    .match-date {
+        font-family: 'Orbitron', monospace;
         font-size: 0.8rem;
-        margin-left: 10px;
+        color: #00d4ff;
+        margin-bottom: 8px;
     }
     
-    /* ═══════════════════════════════════════════════════════════════
-       GENERAL TEXT
-    ═══════════════════════════════════════════════════════════════ */
-    
-    p, span, div {
-        color: #e0e0e0;
-    }
-    
-    strong, b {
+    .match-teams {
+        font-family: 'Rajdhani', sans-serif;
+        font-size: 1rem;
         color: #ffffff;
+        margin: 4px 0;
     }
     
-    .stMarkdown {
-        color: #e0e0e0 !important;
+    .match-score {
+        font-family: 'Orbitron', monospace;
+        font-size: 1.3rem;
+        font-weight: 700;
+        color: #00ff88;
+        text-align: center;
+        margin: 8px 0;
     }
     
-    .stMarkdown p {
-        color: #e0e0e0 !important;
-    }
-    
-    .stMarkdown strong {
-        color: #ffffff !important;
-    }
+    p, span, div { color: #e0e0e0; }
+    strong, b { color: #ffffff; }
+    .stMarkdown { color: #e0e0e0 !important; }
+    .stMarkdown p { color: #e0e0e0 !important; }
+    .stMarkdown strong { color: #ffffff !important; }
     
     .net-positive {
         color: #00ff88 !important;
         font-weight: 700;
-        text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
     }
     
     .net-negative {
         color: #ff6b35 !important;
         font-weight: 700;
-        text-shadow: 0 0 10px rgba(255, 107, 53, 0.5);
     }
     
     .neon-divider {
         height: 2px;
         background: linear-gradient(90deg, transparent, #00ff88, #00d4ff, #ff6b35, transparent);
-        margin: 20px 0;
-        border-radius: 2px;
+        margin: 15px 0;
     }
-    
-    /* ═══════════════════════════════════════════════════════════════
-       SIDEBAR
-    ═══════════════════════════════════════════════════════════════ */
     
     [data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0d2137 0%, #1a3a52 100%) !important;
     }
     
-    [data-testid="stSidebar"] .stMarkdown {
-        color: #ffffff !important;
-    }
-    
-    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] h4 {
-        color: #00ffcc !important;
-    }
-    
     .stAlert {
         background: rgba(0, 0, 0, 0.3) !important;
         border-radius: 12px !important;
-        color: #ffffff !important;
-    }
-    
-    .stDownloadButton > button {
-        font-family: 'Rajdhani', sans-serif !important;
-        font-weight: 600 !important;
-        background: linear-gradient(135deg, rgba(0, 212, 255, 0.3), rgba(0, 255, 136, 0.2)) !important;
-        color: #ffffff !important;
-        border: 2px solid rgba(0, 212, 255, 0.5) !important;
-        border-radius: 12px !important;
-        min-height: 50px !important;
     }
     
     .tennis-ball {
-        font-size: 1.5rem;
+        font-size: 1.3rem;
         animation: bounce 0.6s ease-in-out infinite;
         display: inline-block;
     }
     
     @keyframes bounce {
         0%, 100% { transform: translateY(0); }
-        50% { transform: translateY(-8px); }
+        50% { transform: translateY(-6px); }
     }
     
-    /* ═══════════════════════════════════════════════════════════════
-       MOBILE ADJUSTMENTS
-    ═══════════════════════════════════════════════════════════════ */
+    .setup-box {
+        background: rgba(255, 193, 7, 0.1);
+        border: 2px solid rgba(255, 193, 7, 0.5);
+        border-radius: 15px;
+        padding: 20px;
+        margin: 20px 0;
+    }
+    
+    .setup-box code {
+        background: rgba(0, 0, 0, 0.3);
+        padding: 2px 6px;
+        border-radius: 4px;
+        color: #00ff88;
+    }
     
     @media (max-width: 768px) {
-        .stTabs [data-baseweb="tab-list"] {
-            flex-direction: row;
-            flex-wrap: wrap;
-        }
-        
         .stTabs [data-baseweb="tab"] {
             flex: 1 1 30%;
-            text-align: center;
-            padding: 10px 6px !important;
-            font-size: 0.75rem !important;
-        }
-        
-        .team-card, .register-card {
-            padding: 12px;
-        }
-        
-        .stButton > button {
-            padding: 12px 20px !important;
+            padding: 6px 4px !important;
+            font-size: 0.65rem !important;
         }
     }
 </style>
@@ -543,26 +651,37 @@ st.markdown("""
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 📊 SESSION STATE
+# 🔌 CONNECT TO GOOGLE SHEETS
 # ═══════════════════════════════════════════════════════════════════
 
-if 'players' not in st.session_state:
-    st.session_state.players = []
+spreadsheet = get_google_sheet()
+players_ws, matches_ws, reviews_ws = init_worksheets(spreadsheet)
 
-if 'group_a' not in st.session_state:
-    st.session_state.group_a = []
+# 检查连接状态
+CONNECTED = spreadsheet is not None and players_ws is not None
 
-if 'group_b' not in st.session_state:
-    st.session_state.group_b = []
 
-if 'current_pairing' not in st.session_state:
+# ═══════════════════════════════════════════════════════════════════
+# 📊 LOAD DATA
+# ═══════════════════════════════════════════════════════════════════
+
+if 'data_loaded' not in st.session_state:
+    if CONNECTED:
+        players, group_a, group_b = load_players(players_ws)
+        matches = load_matches(matches_ws)
+        reviews = load_reviews(reviews_ws)
+    else:
+        players, group_a, group_b = [], [], []
+        matches = []
+        reviews = []
+    
+    st.session_state.players = players
+    st.session_state.group_a = group_a
+    st.session_state.group_b = group_b
+    st.session_state.matches = matches
+    st.session_state.reviews = reviews
     st.session_state.current_pairing = None
-
-if 'match_records' not in st.session_state:
-    st.session_state.match_records = []
-
-if 'reviews' not in st.session_state:
-    st.session_state.reviews = []
+    st.session_state.data_loaded = True
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -572,86 +691,89 @@ if 'reviews' not in st.session_state:
 st.markdown('<h1 class="main-title">🎾 TENNIS LIFE</h1>', unsafe_allow_html=True)
 st.markdown('<p class="subtitle">网球人生 · 双打配对</p>', unsafe_allow_html=True)
 st.markdown(f'<div style="text-align: center;"><span class="date-badge">📅 {datetime.now().strftime("%Y年%m月%d日")}</span></div>', unsafe_allow_html=True)
+
+# 连接状态提示
+if CONNECTED:
+    st.markdown('<div style="text-align:center;color:#00ff88;font-size:0.8rem;">✅ 已连接 Google Sheets</div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div style="text-align:center;color:#ff6b35;font-size:0.8rem;">⚠️ 未连接数据库 (演示模式)</div>', unsafe_allow_html=True)
+
 st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 📝 SIDEBAR - ADMIN FUNCTIONS
+# 📝 SIDEBAR
 # ═══════════════════════════════════════════════════════════════════
 
 with st.sidebar:
-    st.markdown("### ⚙️ 管理员功能")
+    st.markdown("### ⚙️ 状态")
     st.markdown("---")
     
-    st.markdown("#### 📊 当前统计")
+    if CONNECTED:
+        st.success("✅ Google Sheets 已连接")
+    else:
+        st.warning("⚠️ 演示模式")
+    
     st.markdown(f"**A组**: {len(st.session_state.group_a)} 人")
     st.markdown(f"**B组**: {len(st.session_state.group_b)} 人")
-    st.markdown(f"**战绩**: {len(st.session_state.match_records)} 场")
+    st.markdown(f"**战绩**: {len(st.session_state.matches)} 场")
     st.markdown(f"**吐槽**: {len(st.session_state.reviews)} 条")
     
     st.markdown("---")
     
-    st.markdown("#### ⚡ 批量导入球员")
-    preset_names = st.text_area("每行: 姓名,评分", 
-                                 placeholder="张三,4.0\n李四,3.5",
-                                 height=100,
-                                 key="admin_batch")
-    
-    if st.button("📥 批量导入", use_container_width=True, key="admin_import"):
-        if preset_names.strip():
-            lines = preset_names.strip().split('\n')
-            added = 0
-            for line in lines:
-                if ',' in line:
-                    parts = line.split(',')
-                    name = parts[0].strip()
-                    try:
-                        rating = float(parts[1].strip())
-                        # Check duplicate
-                        existing = [p["name"] for p in st.session_state.players]
-                        if name not in existing:
-                            player = {
-                                "name": name,
-                                "rating": rating,
-                                "group": "A" if rating >= 4.0 else "B"
-                            }
-                            st.session_state.players.append(player)
-                            if player["group"] == "A":
-                                st.session_state.group_a.append(player)
-                            else:
-                                st.session_state.group_b.append(player)
-                            added += 1
-                    except:
-                        pass
-            if added > 0:
-                st.success(f"✅ 导入 {added} 人")
-                st.rerun()
-    
-    st.markdown("---")
-    
-    if st.button("🗑️ 清空所有球员", use_container_width=True):
-        st.session_state.players = []
-        st.session_state.group_a = []
-        st.session_state.group_b = []
-        st.session_state.current_pairing = None
-        st.rerun()
-    
-    if st.button("🗑️ 清空所有记录", use_container_width=True):
-        st.session_state.match_records = []
-        st.session_state.reviews = []
-        st.success("✅ 已清空")
+    if st.button("🔄 刷新数据", use_container_width=True):
+        st.session_state.data_loaded = False
         st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 👥 MAIN CONTENT TABS
+# 👥 MAIN TABS
 # ═══════════════════════════════════════════════════════════════════
+
+# 如果未连接，显示配置指南
+if not CONNECTED:
+    st.markdown("""
+    <div class="setup-box">
+        <h3 style="color: #ffc107;">📋 配置 Google Sheets 存储</h3>
+        <p style="color: #e0e0e0;">按以下步骤配置持久化存储：</p>
+        <ol style="color: #e0e0e0;">
+            <li>创建 Google Cloud 项目并启用 Google Sheets API</li>
+            <li>创建服务账号并下载 JSON 密钥</li>
+            <li>创建一个新的 Google Sheet 并分享给服务账号邮箱</li>
+            <li>在 Streamlit Cloud 的 Secrets 中添加配置</li>
+        </ol>
+        <p style="color: #88ccff;">Secrets 格式：</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.code('''
+# .streamlit/secrets.toml
+
+sheet_url = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "xxx"
+private_key = "-----BEGIN PRIVATE KEY-----\\nXXX\\n-----END PRIVATE KEY-----\\n"
+client_email = "your-service@your-project.iam.gserviceaccount.com"
+client_id = "123456789"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/..."
+    ''', language='toml')
+    
+    st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
+    st.markdown("### 👇 以下为演示模式 (数据不会保存)")
+    st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
+
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["✍️ 自评入组", "🏆 分组抽签", "📊 战绩记录", "😤 复盘吐槽", "📋 历史记录"])
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TAB 1: 球友自评入组
+# TAB 1: 自评入组
 # ═══════════════════════════════════════════════════════════════════
 
 with tab1:
@@ -659,12 +781,9 @@ with tab1:
     
     st.markdown("""
     <div class="register-card">
-        <p style="color: #00ffcc; font-size: 1.1rem; margin-bottom: 15px;">
-            👋 欢迎加入今日网球活动！请填写你的信息：
-        </p>
-        <p style="color: #88ccff; font-size: 0.95rem;">
-            • <strong>A组</strong>：自评 4.0 及以上 → 高手区<br>
-            • <strong>B组</strong>：自评 3.5+ → 进阶区
+        <p style="color: #00ffcc; font-size: 1rem;">👋 欢迎加入！</p>
+        <p style="color: #88ccff; font-size: 0.9rem;">
+            <strong>A组</strong>：4.0+ 高手 | <strong>B组</strong>：3.5及以下
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -672,83 +791,71 @@ with tab1:
     col_reg1, col_reg2 = st.columns([2, 1])
     
     with col_reg1:
-        register_name = st.text_input("📝 你的名字", placeholder="输入你的名字或昵称", key="reg_name")
+        register_name = st.text_input("📝 名字", placeholder="输入名字", key="reg_name")
     
     with col_reg2:
-        register_rating = st.selectbox("⭐ 自评水平", 
-                                        ["4.5 (高手)", "4.0 (高手)", "3.5 (进阶)", "3.0 (进阶)", "2.5 (入门)"], 
-                                        key="reg_rating")
+        register_rating = st.selectbox("⭐ 水平", ["4.5", "4.0", "3.5", "3.0", "2.5"], key="reg_rating")
     
-    if st.button("🎾 加入今日活动", use_container_width=True, key="reg_submit"):
+    if st.button("🎾 加入活动", use_container_width=True, key="reg_submit"):
         if register_name.strip():
-            # Extract rating number
-            rating = float(register_rating.split()[0])
+            rating = float(register_rating)
+            existing = [p["name"].lower() for p in st.session_state.players]
             
-            # Check duplicate
-            existing_names = [p["name"].lower() for p in st.session_state.players]
-            if register_name.strip().lower() in existing_names:
-                st.warning(f"⚠️ '{register_name}' 已经报名了！")
+            if register_name.strip().lower() in existing:
+                st.warning(f"⚠️ '{register_name}' 已报名")
             else:
                 player = {
                     "name": register_name.strip(),
                     "rating": rating,
                     "group": "A" if rating >= 4.0 else "B"
                 }
-                st.session_state.players.append(player)
-                if player["group"] == "A":
-                    st.session_state.group_a.append(player)
-                else:
-                    st.session_state.group_b.append(player)
                 
-                group_name = "A组 (高手区)" if player["group"] == "A" else "B组 (进阶区)"
-                st.success(f"✅ {register_name} 已加入 {group_name}！")
-                st.balloons()
-                st.rerun()
+                # 保存到 Google Sheets
+                if CONNECTED:
+                    if add_player(players_ws, player):
+                        st.session_state.players.append(player)
+                        if player["group"] == "A":
+                            st.session_state.group_a.append(player)
+                        else:
+                            st.session_state.group_b.append(player)
+                        st.success(f"✅ {register_name} → {'A组' if player['group']=='A' else 'B组'}")
+                        st.balloons()
+                    else:
+                        st.error("保存失败")
+                else:
+                    st.session_state.players.append(player)
+                    if player["group"] == "A":
+                        st.session_state.group_a.append(player)
+                    else:
+                        st.session_state.group_b.append(player)
+                    st.success(f"✅ {register_name} → {'A组' if player['group']=='A' else 'B组'} (演示)")
+                    st.balloons()
         else:
-            st.warning("⚠️ 请输入你的名字")
+            st.warning("⚠️ 请输入名字")
     
     st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
-    
-    # Show current groups
-    st.markdown('<p class="sub-header">📋 今日报名名单</p>', unsafe_allow_html=True)
     
     col_a, col_b = st.columns(2)
     
     with col_a:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<span class="group-label group-a">A组</span>', unsafe_allow_html=True)
-        st.markdown("**⭐ 4.0+ 高手区**")
-        
         if st.session_state.group_a:
-            for player in st.session_state.group_a:
-                st.markdown(f"""
-                <div class="player-item">
-                    <span class="player-item-name">{player['name']}</span>
-                    <span class="player-item-rating">⭐ {player['rating']}</span>
-                </div>
-                """, unsafe_allow_html=True)
+            for p in st.session_state.group_a:
+                st.markdown(f'<div class="player-item"><span class="player-item-name">{p["name"]}</span><span class="player-item-rating">⭐{p["rating"]}</span></div>', unsafe_allow_html=True)
         else:
-            st.markdown("*暂无球员*")
-        
+            st.markdown("*暂无*")
         st.markdown(f"**共 {len(st.session_state.group_a)} 人**")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col_b:
         st.markdown('<div class="team-card team-card-b">', unsafe_allow_html=True)
         st.markdown('<span class="group-label group-b">B组</span>', unsafe_allow_html=True)
-        st.markdown("**⭐ 3.5+ 进阶区**")
-        
         if st.session_state.group_b:
-            for player in st.session_state.group_b:
-                st.markdown(f"""
-                <div class="player-item player-item-b">
-                    <span class="player-item-name">{player['name']}</span>
-                    <span class="player-item-rating">⭐ {player['rating']}</span>
-                </div>
-                """, unsafe_allow_html=True)
+            for p in st.session_state.group_b:
+                st.markdown(f'<div class="player-item player-item-b"><span class="player-item-name">{p["name"]}</span><span class="player-item-rating">⭐{p["rating"]}</span></div>', unsafe_allow_html=True)
         else:
-            st.markdown("*暂无球员*")
-        
+            st.markdown("*暂无*")
         st.markdown(f"**共 {len(st.session_state.group_b)} 人**")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -760,76 +867,48 @@ with tab1:
 with tab2:
     st.markdown('<p class="section-header">🎲 双打抽签</p>', unsafe_allow_html=True)
     
-    # Show group counts
-    col_count_a, col_count_b = st.columns(2)
-    with col_count_a:
-        st.markdown(f"**A组**: {len(st.session_state.group_a)} 人")
-    with col_count_b:
-        st.markdown(f"**B组**: {len(st.session_state.group_b)} 人")
+    st.markdown(f"**A组**: {len(st.session_state.group_a)} | **B组**: {len(st.session_state.group_b)}")
     
-    st.markdown("---")
-    
-    if st.button("🎾 开始抽签！", use_container_width=True, key="draw_btn"):
-        total_players = len(st.session_state.group_a) + len(st.session_state.group_b)
-        
-        if total_players >= 4:
-            all_players = st.session_state.group_a + st.session_state.group_b
-            random.shuffle(all_players)
-            
-            # Try to mix A and B players
+    if st.button("🎾 开始抽签", use_container_width=True, key="draw"):
+        total = len(st.session_state.group_a) + len(st.session_state.group_b)
+        if total >= 4:
             if len(st.session_state.group_a) >= 2 and len(st.session_state.group_b) >= 2:
-                # Mix: 1A+1B vs 1A+1B
-                a_players = st.session_state.group_a.copy()
-                b_players = st.session_state.group_b.copy()
-                random.shuffle(a_players)
-                random.shuffle(b_players)
-                
-                team1 = [a_players[0], b_players[0]]
-                team2 = [a_players[1], b_players[1]]
+                a = st.session_state.group_a.copy()
+                b = st.session_state.group_b.copy()
+                random.shuffle(a)
+                random.shuffle(b)
+                team1 = [a[0], b[0]]
+                team2 = [a[1], b[1]]
             else:
-                # Just random pairs
-                team1 = all_players[:2]
-                team2 = all_players[2:4]
-            
-            st.session_state.current_pairing = {
-                "team1": team1,
-                "team2": team2,
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            }
+                all_p = st.session_state.group_a + st.session_state.group_b
+                random.shuffle(all_p)
+                team1 = all_p[:2]
+                team2 = all_p[2:4]
+            st.session_state.current_pairing = {"team1": team1, "team2": team2}
             st.rerun()
         else:
-            st.warning("⚠️ 至少需要4名球员才能抽签")
+            st.warning("⚠️ 至少需要4人")
     
-    # Display current pairing
     if st.session_state.current_pairing:
-        pairing = st.session_state.current_pairing
-        
+        p = st.session_state.current_pairing
         st.markdown("---")
-        st.markdown("### 🏆 本轮对阵")
-        
         col_t1, col_vs, col_t2 = st.columns([2, 1, 2])
-        
         with col_t1:
-            st.markdown('<div class="team-card">', unsafe_allow_html=True)
-            st.markdown('<p class="team-label">TEAM 1</p>', unsafe_allow_html=True)
-            for p in pairing["team1"]:
-                group_class = "" if p.get("group") == "A" else " player-name-b"
-                st.markdown(f'<p class="player-name{group_class}">{p["name"]}</p>', unsafe_allow_html=True)
+            st.markdown('<div class="team-card"><p class="team-label">TEAM 1</p>', unsafe_allow_html=True)
+            for x in p["team1"]:
+                c = "" if x.get("group")=="A" else " player-name-b"
+                st.markdown(f'<p class="player-name{c}">{x["name"]}</p>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
-        
         with col_vs:
             st.markdown('<div class="vs-badge">⚡VS⚡</div>', unsafe_allow_html=True)
-        
         with col_t2:
-            st.markdown('<div class="team-card team-card-b">', unsafe_allow_html=True)
-            st.markdown('<p class="team-label">TEAM 2</p>', unsafe_allow_html=True)
-            for p in pairing["team2"]:
-                group_class = "" if p.get("group") == "A" else " player-name-b"
-                st.markdown(f'<p class="player-name{group_class}">{p["name"]}</p>', unsafe_allow_html=True)
+            st.markdown('<div class="team-card team-card-b"><p class="team-label">TEAM 2</p>', unsafe_allow_html=True)
+            for x in p["team2"]:
+                c = "" if x.get("group")=="A" else " player-name-b"
+                st.markdown(f'<p class="player-name{c}">{x["name"]}</p>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
         
-        # Re-draw button
-        if st.button("🔄 重新抽签", use_container_width=True, key="redraw_btn"):
+        if st.button("🔄 重抽", use_container_width=True):
             st.session_state.current_pairing = None
             st.rerun()
 
@@ -841,180 +920,160 @@ with tab2:
 with tab3:
     st.markdown('<p class="section-header">📊 战绩记录</p>', unsafe_allow_html=True)
     
-    if st.session_state.current_pairing:
-        pairing = st.session_state.current_pairing
+    names = [p["name"] for p in st.session_state.players]
+    
+    st.markdown("#### ➕ 新增战绩")
+    
+    match_date = st.date_input("📅 日期", value=date.today(), key="m_date")
+    
+    st.markdown("**Team 1**")
+    c1, c2 = st.columns(2)
+    with c1:
+        t1p1 = st.selectbox("球员1", ["选择..."]+names, key="t1p1") if names else st.text_input("球员1", key="t1p1i")
+    with c2:
+        t1p2 = st.selectbox("球员2", ["选择..."]+names, key="t1p2") if names else st.text_input("球员2", key="t1p2i")
+    
+    st.markdown("**Team 2**")
+    c3, c4 = st.columns(2)
+    with c3:
+        t2p1 = st.selectbox("球员1", ["选择..."]+names, key="t2p1") if names else st.text_input("球员1", key="t2p1i")
+    with c4:
+        t2p2 = st.selectbox("球员2", ["选择..."]+names, key="t2p2") if names else st.text_input("球员2", key="t2p2i")
+    
+    st.markdown("**比分**")
+    sc1, scc, sc2 = st.columns([2,1,2])
+    with sc1:
+        s1 = st.text_input("T1", placeholder="7", key="s1")
+    with scc:
+        st.markdown("<div style='text-align:center;font-size:2rem;color:#fff;padding-top:20px;'>:</div>", unsafe_allow_html=True)
+    with sc2:
+        s2 = st.text_input("T2", placeholder="6", key="s2")
+    
+    if st.button("💾 保存战绩", use_container_width=True, key="save_m"):
+        team1_n = [x for x in [t1p1 if isinstance(t1p1,str) and t1p1!="选择..." else None, t1p2 if isinstance(t1p2,str) and t1p2!="选择..." else None] if x]
+        team2_n = [x for x in [t2p1 if isinstance(t2p1,str) and t2p1!="选择..." else None, t2p2 if isinstance(t2p2,str) and t2p2!="选择..." else None] if x]
         
-        st.markdown(f"**🆚 对阵**: {pairing['team1'][0]['name']} & {pairing['team1'][1]['name']} vs {pairing['team2'][0]['name']} & {pairing['team2'][1]['name']}")
-        
-        st.markdown("---")
-        st.markdown("#### 📝 输入比分")
-        
-        col_s1, col_colon, col_s2 = st.columns([2, 1, 2])
-        
-        with col_s1:
-            score1 = st.text_input("Team 1 得分", placeholder="7", key="score1_input")
-        
-        with col_colon:
-            st.markdown("<div style='text-align: center; font-size: 2.5rem; color: #fff; padding-top: 25px;'>:</div>", unsafe_allow_html=True)
-        
-        with col_s2:
-            score2 = st.text_input("Team 2 得分", placeholder="6", key="score2_input")
-        
-        if score1 and score2:
+        if not team1_n or not team2_n:
+            st.warning("⚠️ 每队至少1人")
+        elif not s1 or not s2:
+            st.warning("⚠️ 填写比分")
+        else:
             try:
-                s1 = int(score1)
-                s2 = int(score2)
-                net_diff = s1 - s2
-                
-                st.markdown("---")
-                
-                winner_names = pairing['team1'] if s1 > s2 else (pairing['team2'] if s2 > s1 else None)
-                
-                if winner_names:
-                    st.markdown(f"**🏆 获胜**: {winner_names[0]['name']} & {winner_names[1]['name']}")
+                score1, score2 = int(s1), int(s2)
+                match = {
+                    "date": match_date.strftime("%Y-%m-%d"),
+                    "team1": team1_n,
+                    "team2": team2_n,
+                    "score1": score1,
+                    "score2": score2,
+                    "net_diff": score1 - score2,
+                    "winner": "team1" if score1>score2 else ("team2" if score2>score1 else "tie")
+                }
+                if CONNECTED:
+                    if add_match(matches_ws, match):
+                        st.session_state.matches.append(match)
+                        st.success("✅ 已保存")
+                        st.balloons()
+                    else:
+                        st.error("保存失败")
                 else:
-                    st.markdown("**🏆 结果**: 平局")
-                
-                st.markdown(f"**📊 比分**: {s1} : {s2}")
-                
-                net_class = "net-positive" if net_diff > 0 else ("net-negative" if net_diff < 0 else "")
-                sign = "+" if net_diff > 0 else ""
-                st.markdown(f"**净胜分 (T1)**: <span class='{net_class}'>{sign}{net_diff}</span>", unsafe_allow_html=True)
-                
-                if st.button("💾 保存战绩", use_container_width=True, key="save_score"):
-                    record = {
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "team1": [p["name"] for p in pairing["team1"]],
-                        "team2": [p["name"] for p in pairing["team2"]],
-                        "score1": s1,
-                        "score2": s2,
-                        "net_diff": net_diff,
-                        "winner": "team1" if s1 > s2 else ("team2" if s2 > s1 else "tie")
-                    }
-                    st.session_state.match_records.append(record)
-                    st.success("✅ 战绩已保存！")
-                    st.balloons()
-                    
-            except ValueError:
-                st.warning("⚠️ 请输入有效数字")
+                    st.session_state.matches.append(match)
+                    st.success("✅ 已保存 (演示)")
+            except:
+                st.warning("⚠️ 比分须为数字")
+    
+    st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
+    st.markdown("#### 📋 最近战绩")
+    
+    if st.session_state.matches:
+        for m in reversed(st.session_state.matches[-10:]):
+            w1 = "🏆" if m['winner']=='team1' else ""
+            w2 = "🏆" if m['winner']=='team2' else ""
+            st.markdown(f'''
+            <div class="match-card">
+                <div class="match-date">📅 {m['date']}</div>
+                <div class="match-teams">{w1} {" & ".join(m['team1'])}</div>
+                <div class="match-score">{m['score1']} : {m['score2']}</div>
+                <div class="match-teams">{w2} {" & ".join(m['team2'])}</div>
+            </div>
+            ''', unsafe_allow_html=True)
     else:
-        st.info("💡 请先在「分组抽签」进行抽签")
+        st.info("💡 暂无战绩")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TAB 4: 复盘吐槽 (实名/匿名)
+# TAB 4: 复盘吐槽
 # ═══════════════════════════════════════════════════════════════════
 
 with tab4:
     st.markdown('<p class="section-header">😤 复盘吐槽</p>', unsafe_allow_html=True)
     
-    # Get list of registered players for selection
-    all_player_names = [p["name"] for p in st.session_state.players]
+    names = [p["name"] for p in st.session_state.players]
     
-    st.markdown("#### 👤 你是谁？")
-    
-    col_author, col_anon = st.columns([3, 1])
-    
-    with col_author:
-        if all_player_names:
-            author_options = ["选择你的名字..."] + all_player_names + ["其他 (手动输入)"]
-            selected_author = st.selectbox("选择身份", author_options, key="roast_author_select", label_visibility="collapsed")
-            
-            if selected_author == "其他 (手动输入)":
-                author_name = st.text_input("输入你的名字", placeholder="你的名字", key="roast_author_input")
-            elif selected_author == "选择你的名字...":
-                author_name = ""
-            else:
-                author_name = selected_author
+    col_au, col_an = st.columns([3,1])
+    with col_au:
+        if names:
+            sel = st.selectbox("👤 身份", ["选择..."]+names+["其他"], key="r_au")
+            author = st.text_input("名字", key="r_au_o") if sel=="其他" else ("" if sel=="选择..." else sel)
         else:
-            author_name = st.text_input("输入你的名字", placeholder="你的名字", key="roast_author_input_only")
+            author = st.text_input("👤 名字", key="r_au_only")
+    with col_an:
+        anon = st.checkbox("🎭匿名", key="anon")
     
-    with col_anon:
-        is_anonymous = st.checkbox("🎭 匿名", key="is_anon")
+    rtype = st.radio("类型", ["🎾 复盘", "😤 吐槽搭档", "🤦 吐槽自己"], horizontal=True, key="rtype")
     
-    st.markdown("---")
+    target = ""
+    if rtype == "😤 吐槽搭档":
+        target = st.selectbox("🎯 吐槽谁", ["选择..."]+names, key="r_tgt") if names else st.text_input("🎯 吐槽谁", key="r_tgt_i")
+        if target == "选择...": target = ""
     
-    # Roast type selection
-    roast_type = st.radio(
-        "选择吐槽类型",
-        ["🎾 比赛复盘", "😤 吐槽搭档", "🤦 吐槽自己"],
-        horizontal=True,
-        key="roast_type"
-    )
+    content = st.text_area("💬 内容", placeholder="写下你的想法...", height=100, key="r_cnt")
     
-    # Target selection for partner roast
-    target_name = ""
-    if roast_type == "😤 吐槽搭档":
-        st.markdown("#### 🎯 吐槽谁？")
-        if all_player_names:
-            target_options = ["选择要吐槽的搭档..."] + all_player_names
-            target_name = st.selectbox("选择搭档", target_options, key="roast_target", label_visibility="collapsed")
-            if target_name == "选择要吐槽的搭档...":
-                target_name = ""
-        else:
-            target_name = st.text_input("搭档名字", placeholder="输入搭档名字", key="roast_target_input")
-    
-    # Content
-    st.markdown("#### 💬 内容")
-    
-    if roast_type == "🎾 比赛复盘":
-        placeholder_text = "今天比赛发挥得怎么样？有什么战术心得？"
-    elif roast_type == "😤 吐槽搭档":
-        placeholder_text = "搭档今天网前太保守了，该上的球不上..."
-    else:
-        placeholder_text = "今天二发太菜了，关键分心态崩了..."
-    
-    roast_content = st.text_area(
-        "写下你的想法",
-        placeholder=placeholder_text,
-        height=120,
-        key="roast_content",
-        label_visibility="collapsed"
-    )
-    
-    if st.button("📤 发布", use_container_width=True, key="submit_roast"):
-        if not roast_content.strip():
-            st.warning("⚠️ 请填写内容")
-        elif not is_anonymous and not author_name:
-            st.warning("⚠️ 请选择你的名字或勾选匿名")
-        elif roast_type == "😤 吐槽搭档" and not target_name:
-            st.warning("⚠️ 请选择要吐槽的搭档")
+    if st.button("📤 发布", use_container_width=True, key="r_sub"):
+        if not content.strip():
+            st.warning("⚠️ 填写内容")
+        elif not anon and not author:
+            st.warning("⚠️ 选择身份或匿名")
+        elif rtype=="😤 吐槽搭档" and not target:
+            st.warning("⚠️ 选择吐槽对象")
         else:
             review = {
                 "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "author": "匿名球友" if is_anonymous else author_name,
-                "is_anonymous": is_anonymous,
-                "type": roast_type,
-                "target": target_name if roast_type == "😤 吐槽搭档" else "",
-                "content": roast_content
+                "author": "匿名球友" if anon else author,
+                "is_anonymous": anon,
+                "type": rtype,
+                "target": target if rtype=="😤 吐槽搭档" else "",
+                "content": content
             }
-            st.session_state.reviews.append(review)
-            st.success("✅ 发布成功！")
-            st.rerun()
+            if CONNECTED:
+                if add_review(reviews_ws, review):
+                    st.session_state.reviews.append(review)
+                    st.success("✅ 已发布")
+                    st.rerun()
+                else:
+                    st.error("发布失败")
+            else:
+                st.session_state.reviews.append(review)
+                st.success("✅ 已发布 (演示)")
+                st.rerun()
     
     st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
-    
-    # Display recent roasts
-    st.markdown("#### 📜 最新吐槽")
+    st.markdown("#### 📜 吐槽墙")
     
     if st.session_state.reviews:
-        for review in reversed(st.session_state.reviews[-10:]):  # Show last 10
-            type_emoji = "🎾" if review["type"] == "🎾 比赛复盘" else ("😤" if review["type"] == "😤 吐槽搭档" else "🤦")
-            anon_badge = '<span class="anon-badge">匿名</span>' if review.get("is_anonymous") else ""
-            
-            target_text = f" → <strong>{review['target']}</strong>" if review.get("target") else ""
-            
-            st.markdown(f"""
+        for r in reversed(st.session_state.reviews):
+            emoji = r["type"].split()[0] if r["type"] else "💬"
+            badge = '<span class="anon-badge">匿名</span>' if r.get("is_anonymous") else ""
+            tgt = f" → <strong>{r['target']}</strong>" if r.get("target") else ""
+            st.markdown(f'''
             <div class="roast-card">
-                <div class="roast-author">
-                    {type_emoji} {review['author']}{anon_badge}{target_text}
-                </div>
-                <div class="roast-content">{review['content']}</div>
-                <div class="roast-time">🕐 {review['date']}</div>
+                <div class="roast-author">{emoji} {r['author']}{badge}{tgt}</div>
+                <div class="roast-content">{r['content']}</div>
+                <div class="roast-time">🕐 {r['date']}</div>
             </div>
-            """, unsafe_allow_html=True)
+            ''', unsafe_allow_html=True)
     else:
-        st.info("💡 暂无吐槽，来发第一条吧！")
+        st.info("💡 暂无吐槽")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1022,58 +1081,38 @@ with tab4:
 # ═══════════════════════════════════════════════════════════════════
 
 with tab5:
-    st.markdown('<p class="section-header">📋 历史记录</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">📋 完整历史</p>', unsafe_allow_html=True)
     
-    # Match records
-    st.markdown("#### 🏆 战绩历史")
-    
-    if st.session_state.match_records:
-        for i, record in enumerate(reversed(st.session_state.match_records)):
-            with st.expander(f"📅 {record['date']} | {record['score1']}:{record['score2']}", expanded=(i==0)):
-                st.markdown(f"**Team 1**: {' & '.join(record['team1'])} → {record['score1']}分")
-                st.markdown(f"**Team 2**: {' & '.join(record['team2'])} → {record['score2']}分")
-                
-                net_class = "net-positive" if record['net_diff'] > 0 else ("net-negative" if record['net_diff'] < 0 else "")
-                sign = "+" if record['net_diff'] > 0 else ""
-                st.markdown(f"**净胜分**: <span class='{net_class}'>{sign}{record['net_diff']}</span>", unsafe_allow_html=True)
-                
-                winner_text = "Team 1 🏆" if record['winner'] == 'team1' else ("Team 2 🏆" if record['winner'] == 'team2' else "平局")
-                st.markdown(f"**结果**: {winner_text}")
+    st.markdown("#### 🏆 全部战绩")
+    if st.session_state.matches:
+        for i, m in enumerate(reversed(st.session_state.matches)):
+            with st.expander(f"📅 {m['date']} | {m['score1']}:{m['score2']}", expanded=(i<3)):
+                st.markdown(f"**T1**: {' & '.join(m['team1'])} → {m['score1']}")
+                st.markdown(f"**T2**: {' & '.join(m['team2'])} → {m['score2']}")
+                w = "T1🏆" if m['winner']=='team1' else ("T2🏆" if m['winner']=='team2' else "平局")
+                st.markdown(f"**结果**: {w}")
     else:
-        st.info("💡 暂无战绩")
+        st.info("💡 暂无")
     
     st.markdown("---")
-    
-    # All reviews
-    st.markdown("#### 📝 吐槽历史")
-    
+    st.markdown("#### 📝 全部吐槽")
     if st.session_state.reviews:
-        for i, review in enumerate(reversed(st.session_state.reviews)):
-            with st.expander(f"📅 {review['date']} - {review['type']}", expanded=(i==0)):
-                st.markdown(f"**作者**: {review['author']}")
-                if review.get("target"):
-                    st.markdown(f"**吐槽对象**: {review['target']}")
-                st.markdown(f"**内容**: {review['content']}")
+        for i, r in enumerate(reversed(st.session_state.reviews)):
+            with st.expander(f"📅 {r['date']} - {r['type']}", expanded=(i<3)):
+                st.markdown(f"**作者**: {r['author']}")
+                if r.get("target"): st.markdown(f"**对象**: {r['target']}")
+                st.markdown(f"**内容**: {r['content']}")
     else:
-        st.info("💡 暂无复盘")
+        st.info("💡 暂无")
     
     st.markdown("---")
-    
-    # Export
-    if st.session_state.match_records or st.session_state.reviews:
-        export_data = {
+    if st.session_state.matches or st.session_state.reviews:
+        exp = {
             "players": st.session_state.players,
-            "match_records": st.session_state.match_records,
-            "reviews": st.session_state.reviews,
-            "export_date": datetime.now().strftime("%Y-%m-%d %H:%M")
+            "matches": st.session_state.matches,
+            "reviews": st.session_state.reviews
         }
-        st.download_button(
-            "📥 导出所有数据",
-            data=json.dumps(export_data, ensure_ascii=False, indent=2),
-            file_name=f"tennis_life_{datetime.now().strftime('%Y%m%d')}.json",
-            mime="application/json",
-            use_container_width=True
-        )
+        st.download_button("📥 导出数据", json.dumps(exp, ensure_ascii=False, indent=2), f"tennis_{datetime.now().strftime('%Y%m%d')}.json", "application/json", use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1081,10 +1120,10 @@ with tab5:
 # ═══════════════════════════════════════════════════════════════════
 
 st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
-st.markdown("""
-<div style="text-align: center; padding: 15px; color: #88ccff; font-family: 'Rajdhani', sans-serif;">
+st.markdown('''
+<div style="text-align:center;padding:10px;color:#88ccff;font-family:'Rajdhani',sans-serif;">
     <span class="tennis-ball">🎾</span>
-    <span style="margin: 0 15px; color: #ffffff;">TENNIS LIFE v3.0</span>
+    <span style="margin:0 10px;color:#fff;">TENNIS LIFE v5.0</span>
     <span class="tennis-ball">🎾</span>
 </div>
-""", unsafe_allow_html=True)
+''', unsafe_allow_html=True)
