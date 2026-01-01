@@ -115,9 +115,9 @@ def load_users_cached(_ws_id):
         ws = spreadsheet.worksheet("users")
         records = ws.get_all_records()
         return [{
-            "name": r['name'],
+            "name": str(r['name']),  # 强制转字符串
             "rating": float(r['rating']) if r.get('rating') else 3.0,
-            "password_hash": r.get('password_hash', '')
+            "password_hash": str(r.get('password_hash', ''))
         } for r in records if r.get('name')]
     except:
         return []
@@ -133,9 +133,9 @@ def load_today_groups_cached(_ws_id, _today):
         records = ws.get_all_records()
         group_a, group_b = [], []
         for r in records:
-            if r.get('date') == _today and r.get('name'):
-                player = {"name": r['name'], "rating": float(r['rating']), "group": r['group']}
-                if r['group'] == 'A':
+            if str(r.get('date', '')) == _today and r.get('name'):
+                player = {"name": str(r['name']), "rating": float(r['rating']) if r.get('rating') else 3.0, "group": str(r.get('group', 'B'))}
+                if player['group'] == 'A':
                     group_a.append(player)
                 else:
                     group_b.append(player)
