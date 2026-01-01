@@ -539,7 +539,7 @@ if st.session_state.current_user is None:
                 if user:
                     if verify_password(login_pwd, user.get('password_hash', '')):
                         st.session_state.current_user = user
-                        st.success(f"✅ 欢迎 {user['name']}！")
+                        st.session_state.just_logged_in = True
                         st.rerun()
                     else:
                         st.error("❌ 密码错误")
@@ -578,7 +578,7 @@ if st.session_state.current_user is None:
                         "rating": float(reg_rating),
                         "password_hash": pwd_hash
                     }
-                    st.success("✅ 注册成功！")
+                    st.session_state.just_logged_in = True
                     st.balloons()
                     st.rerun()
 
@@ -593,6 +593,11 @@ else:
         <span class="user-badge">⭐ {st.session_state.current_user['rating']}</span>
     </div>
     ''', unsafe_allow_html=True)
+    
+    # 显示登录成功消息
+    if st.session_state.get('just_logged_in'):
+        st.success(f"✅ 欢迎回来，{st.session_state.current_user['name']}！")
+        st.session_state.just_logged_in = False
     
     tab1, tab2, tab3, tab4 = st.tabs(["🏆 分组抽签", "📊 战绩", "😤 吐槽", "📋 历史"])
     
@@ -618,16 +623,14 @@ else:
                     st.markdown('<div style="text-align:center;color:#ff6b6b;">A组已满</div>', unsafe_allow_html=True)
                 elif st.button(f"🅰️ A组 ({len(group_a)}/{GROUP_A_LIMIT})", key="join_a"):
                     if add_to_group(current_name, st.session_state.current_user['rating'], "A"):
-                        st.success("✅ 已加入A组")
-                        st.rerun()
+                        st.success("✅ 已加入A组，请刷新查看")
             
             with col_b:
                 if len(group_b) >= GROUP_B_LIMIT:
                     st.markdown('<div style="text-align:center;color:#ff6b6b;">B组已满</div>', unsafe_allow_html=True)
                 elif st.button(f"🅱️ B组 ({len(group_b)}/{GROUP_B_LIMIT})", key="join_b"):
                     if add_to_group(current_name, st.session_state.current_user['rating'], "B"):
-                        st.success("✅ 已加入B组")
-                        st.rerun()
+                        st.success("✅ 已加入B组，请刷新查看")
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         
@@ -662,7 +665,6 @@ else:
                 random.shuffle(a)
                 random.shuffle(b)
                 st.session_state.current_pairing = {"team1": [a[0], b[0]], "team2": [a[1], b[1]]}
-                st.rerun()
             else:
                 st.warning("⚠️ A组B组各需至少2人")
         
@@ -687,7 +689,6 @@ else:
             
             if st.button("🔄 重抽", key="redraw"):
                 st.session_state.current_pairing = None
-                st.rerun()
     
     # ═══════════════════════════════════════════════════════════════
     # TAB 2: 战绩
@@ -741,7 +742,7 @@ else:
                         "winner": "team1" if score1 > score2 else ("team2" if score2 > score1 else "tie")
                     }
                     if add_match(match_data):
-                        st.success("✅ 已保存")
+                        st.success("✅ 已保存！点击侧边栏刷新查看")
                         st.balloons()
                 except:
                     st.warning("⚠️ 比分须为数字")
@@ -805,8 +806,7 @@ else:
                     "content": content
                 }
                 if add_review(review_data):
-                    st.success("✅ 已发布")
-                    st.rerun()
+                    st.success("✅ 已发布！点击侧边栏刷新查看")
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         st.markdown("#### 📜 吐槽墙")
