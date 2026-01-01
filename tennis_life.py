@@ -1,8 +1,7 @@
 """
-🎾 TENNIS LIFE - 网球人生 v6.0
-- 注册系统：填名字+水平即可使用全部功能
-- 分组抽签：A组/B组各上限10人，1A+1B配对
-- 战绩记录：支持手动输入未注册球员
+🎾 TENNIS LIFE - 网球人生 v7.0
+- 密码保护：注册需设置密码，登录需验证
+- 数据可靠性：改进保存机制，增加错误处理
 Google Sheets 持久化存储
 """
 
@@ -10,6 +9,20 @@ import streamlit as st
 import random
 from datetime import datetime, date
 import json
+import hashlib
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔐 PASSWORD UTILS
+# ═══════════════════════════════════════════════════════════════════
+
+def hash_password(password):
+    """简单哈希密码"""
+    return hashlib.sha256(password.encode()).hexdigest()[:16]
+
+def verify_password(password, hashed):
+    """验证密码"""
+    return hash_password(password) == hashed
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 📊 GOOGLE SHEETS SETUP
@@ -27,7 +40,6 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-# 组别上限
 GROUP_A_LIMIT = 10
 GROUP_B_LIMIT = 10
 
@@ -43,65 +55,84 @@ def get_google_sheet():
         spreadsheet = client.open_by_url(sheet_url)
         return spreadsheet
     except Exception as e:
+        st.error(f"连接失败: {e}")
+        return None
+
+def get_worksheet(spreadsheet, name, headers):
+    """获取或创建工作表"""
+    if not spreadsheet:
+        return None
+    try:
+        worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
+        if name not in worksheet_names:
+            ws = spreadsheet.add_worksheet(title=name, rows=1000, cols=20)
+            ws.append_row(headers)
+        else:
+            ws = spreadsheet.worksheet(name)
+        return ws
+    except Exception as e:
+        st.error(f"工作表错误: {e}")
         return None
 
 def init_worksheets(spreadsheet):
     if not spreadsheet:
         return None, None, None, None
-    try:
-        worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
-        
-        # Users 表 (注册用户)
-        if "users" not in worksheet_names:
-            users_ws = spreadsheet.add_worksheet(title="users", rows=1000, cols=10)
-            users_ws.append_row(["name", "rating", "created_at"])
-        else:
-            users_ws = spreadsheet.worksheet("users")
-        
-        # Today's Groups 表 (今日分组)
-        if "groups" not in worksheet_names:
-            groups_ws = spreadsheet.add_worksheet(title="groups", rows=100, cols=10)
-            groups_ws.append_row(["name", "rating", "group", "date"])
-        else:
-            groups_ws = spreadsheet.worksheet("groups")
-        
-        # Matches 表
-        if "matches" not in worksheet_names:
-            matches_ws = spreadsheet.add_worksheet(title="matches", rows=1000, cols=15)
-            matches_ws.append_row(["date", "team1", "team2", "score1", "score2", "net_diff", "winner", "created_at"])
-        else:
-            matches_ws = spreadsheet.worksheet("matches")
-        
-        # Reviews 表
-        if "reviews" not in worksheet_names:
-            reviews_ws = spreadsheet.add_worksheet(title="reviews", rows=1000, cols=10)
-            reviews_ws.append_row(["date", "author", "is_anonymous", "type", "target", "content"])
-        else:
-            reviews_ws = spreadsheet.worksheet("reviews")
-        
-        return users_ws, groups_ws, matches_ws, reviews_ws
-    except:
-        return None, None, None, None
+    
+    users_ws = get_worksheet(spreadsheet, "users", ["name", "rating", "password_hash", "created_at"])
+    groups_ws = get_worksheet(spreadsheet, "groups", ["name", "rating", "group", "date"])
+    matches_ws = get_worksheet(spreadsheet, "matches", ["id", "date", "team1", "team2", "score1", "score2", "net_diff", "winner", "created_at"])
+    reviews_ws = get_worksheet(spreadsheet, "reviews", ["id", "date", "author", "is_anonymous", "type", "target", "content"])
+    
+    return users_ws, groups_ws, matches_ws, reviews_ws
+
+# ═══════════════════════════════════════════════════════════════════
+# 📊 DATA OPERATIONS WITH BETTER ERROR HANDLING
+# ═══════════════════════════════════════════════════════════════════
 
 def load_users(ws):
+    """加载用户列表"""
     if not ws:
         return []
     try:
         records = ws.get_all_records()
-        return [{"name": r['name'], "rating": float(r['rating'])} for r in records if r.get('name')]
-    except:
+        users = []
+        for r in records:
+            if r.get('name'):
+                users.append({
+                    "name": r['name'],
+                    "rating": float(r['rating']) if r.get('rating') else 3.0,
+                    "password_hash": r.get('password_hash', '')
+                })
+        return users
+    except Exception as e:
+        st.error(f"加载用户失败: {e}")
         return []
 
 def add_user(ws, user):
+    """添加用户"""
     if not ws:
         return False
     try:
-        ws.append_row([user['name'], user['rating'], datetime.now().strftime("%Y-%m-%d %H:%M")])
+        ws.append_row([
+            user['name'],
+            user['rating'],
+            user['password_hash'],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ])
         return True
-    except:
+    except Exception as e:
+        st.error(f"保存用户失败: {e}")
         return False
 
+def find_user(users, name):
+    """查找用户"""
+    for u in users:
+        if u['name'].lower() == name.lower():
+            return u
+    return None
+
 def load_today_groups(ws):
+    """加载今日分组"""
     if not ws:
         return [], []
     try:
@@ -117,92 +148,119 @@ def load_today_groups(ws):
                 else:
                     group_b.append(player)
         return group_a, group_b
-    except:
+    except Exception as e:
+        st.error(f"加载分组失败: {e}")
         return [], []
 
 def add_to_group(ws, player, group):
+    """添加到分组"""
     if not ws:
         return False
     try:
         today = date.today().strftime("%Y-%m-%d")
         ws.append_row([player['name'], player['rating'], group, today])
         return True
-    except:
-        return False
-
-def clear_today_groups(ws):
-    if not ws:
-        return False
-    try:
-        today = date.today().strftime("%Y-%m-%d")
-        records = ws.get_all_records()
-        rows_to_delete = []
-        for i, r in enumerate(records):
-            if r.get('date') == today:
-                rows_to_delete.append(i + 2)  # +2 for header and 0-index
-        for row in reversed(rows_to_delete):
-            ws.delete_rows(row)
-        return True
-    except:
+    except Exception as e:
+        st.error(f"加入分组失败: {e}")
         return False
 
 def load_matches(ws):
+    """加载战绩 - 改进版"""
     if not ws:
         return []
     try:
         records = ws.get_all_records()
-        return [{
-            "date": r['date'],
-            "team1": r['team1'].split(',') if r.get('team1') else [],
-            "team2": r['team2'].split(',') if r.get('team2') else [],
-            "score1": int(r['score1']) if r.get('score1') else 0,
-            "score2": int(r['score2']) if r.get('score2') else 0,
-            "net_diff": int(r['net_diff']) if r.get('net_diff') else 0,
-            "winner": r.get('winner', 'tie')
-        } for r in records if r.get('date')]
-    except:
+        matches = []
+        for r in records:
+            if r.get('date') or r.get('team1'):  # 更宽松的检查
+                match = {
+                    "id": r.get('id', ''),
+                    "date": str(r.get('date', '')),
+                    "team1": str(r.get('team1', '')).split(',') if r.get('team1') else [],
+                    "team2": str(r.get('team2', '')).split(',') if r.get('team2') else [],
+                    "score1": int(r['score1']) if r.get('score1') and str(r['score1']).isdigit() else 0,
+                    "score2": int(r['score2']) if r.get('score2') and str(r['score2']).isdigit() else 0,
+                    "net_diff": int(r['net_diff']) if r.get('net_diff') else 0,
+                    "winner": r.get('winner', 'tie')
+                }
+                # 过滤掉空记录
+                if match['team1'] and match['team2']:
+                    matches.append(match)
+        return matches
+    except Exception as e:
+        st.error(f"加载战绩失败: {e}")
         return []
 
 def add_match(ws, match):
+    """添加战绩 - 改进版，带唯一ID"""
     if not ws:
         return False
     try:
-        ws.append_row([
-            match['date'], ','.join(match['team1']), ','.join(match['team2']),
-            match['score1'], match['score2'], match['net_diff'], match['winner'],
-            datetime.now().strftime("%Y-%m-%d %H:%M")
-        ])
+        # 生成唯一ID
+        match_id = datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(1000, 9999))
+        
+        row_data = [
+            match_id,
+            match['date'],
+            ','.join(match['team1']),
+            ','.join(match['team2']),
+            str(match['score1']),
+            str(match['score2']),
+            str(match['net_diff']),
+            match['winner'],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ]
+        
+        ws.append_row(row_data)
+        match['id'] = match_id
         return True
-    except:
+    except Exception as e:
+        st.error(f"保存战绩失败: {e}")
         return False
 
 def load_reviews(ws):
+    """加载吐槽"""
     if not ws:
         return []
     try:
         records = ws.get_all_records()
-        return [{
-            "date": r.get('date', ''),
-            "author": r.get('author', '匿名'),
-            "is_anonymous": r.get('is_anonymous', 'FALSE') == 'TRUE',
-            "type": r.get('type', ''),
-            "target": r.get('target', ''),
-            "content": r.get('content', '')
-        } for r in records if r.get('content')]
-    except:
+        reviews = []
+        for r in records:
+            if r.get('content'):
+                reviews.append({
+                    "id": r.get('id', ''),
+                    "date": r.get('date', ''),
+                    "author": r.get('author', '匿名'),
+                    "is_anonymous": str(r.get('is_anonymous', 'FALSE')).upper() == 'TRUE',
+                    "type": r.get('type', ''),
+                    "target": r.get('target', ''),
+                    "content": r.get('content', '')
+                })
+        return reviews
+    except Exception as e:
+        st.error(f"加载吐槽失败: {e}")
         return []
 
 def add_review(ws, review):
+    """添加吐槽 - 带唯一ID"""
     if not ws:
         return False
     try:
+        review_id = datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(1000, 9999))
+        
         ws.append_row([
-            review['date'], review['author'],
+            review_id,
+            review['date'],
+            review['author'],
             'TRUE' if review['is_anonymous'] else 'FALSE',
-            review['type'], review['target'], review['content']
+            review['type'],
+            review['target'],
+            review['content']
         ])
+        review['id'] = review_id
         return True
-    except:
+    except Exception as e:
+        st.error(f"发布吐槽失败: {e}")
         return False
 
 
@@ -665,11 +723,21 @@ CONNECTED = spreadsheet is not None and users_ws is not None
 if 'initialized' not in st.session_state:
     st.session_state.initialized = True
     st.session_state.current_user = None
-    st.session_state.users = load_users(users_ws) if CONNECTED else []
-    st.session_state.group_a, st.session_state.group_b = load_today_groups(groups_ws) if CONNECTED else ([], [])
-    st.session_state.matches = load_matches(matches_ws) if CONNECTED else []
-    st.session_state.reviews = load_reviews(reviews_ws) if CONNECTED else []
+    st.session_state.users = []
+    st.session_state.group_a = []
+    st.session_state.group_b = []
+    st.session_state.matches = []
+    st.session_state.reviews = []
     st.session_state.current_pairing = None
+    st.session_state.data_loaded = False
+
+# Load data from Google Sheets
+if not st.session_state.data_loaded and CONNECTED:
+    st.session_state.users = load_users(users_ws)
+    st.session_state.group_a, st.session_state.group_b = load_today_groups(groups_ws)
+    st.session_state.matches = load_matches(matches_ws)
+    st.session_state.reviews = load_reviews(reviews_ws)
+    st.session_state.data_loaded = True
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -713,72 +781,102 @@ with st.sidebar:
     
     st.markdown("---")
     if st.button("🔄 刷新数据", use_container_width=True):
-        st.session_state.users = load_users(users_ws) if CONNECTED else []
-        st.session_state.group_a, st.session_state.group_b = load_today_groups(groups_ws) if CONNECTED else ([], [])
-        st.session_state.matches = load_matches(matches_ws) if CONNECTED else []
-        st.session_state.reviews = load_reviews(reviews_ws) if CONNECTED else []
+        if CONNECTED:
+            st.session_state.users = load_users(users_ws)
+            st.session_state.group_a, st.session_state.group_b = load_today_groups(groups_ws)
+            st.session_state.matches = load_matches(matches_ws)
+            st.session_state.reviews = load_reviews(reviews_ws)
         st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🔐 CHECK LOGIN - SHOW REGISTER OR MAIN APP
+# 🔐 LOGIN / REGISTER PAGE
 # ═══════════════════════════════════════════════════════════════════
 
 if st.session_state.current_user is None:
+    st.markdown('<p class="section-header">🔐 登录 / 注册</p>', unsafe_allow_html=True)
+    
+    login_tab, register_tab = st.tabs(["🔑 登录", "✍️ 注册"])
+    
     # ═══════════════════════════════════════════════════════════════
-    # 📝 REGISTRATION / LOGIN PAGE
+    # LOGIN TAB
     # ═══════════════════════════════════════════════════════════════
     
-    st.markdown('<p class="section-header">✍️ 注册 / 登录</p>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div class="register-card">
-        <p style="color: #00ffcc; font-size: 1.1rem; margin-bottom: 10px;">👋 欢迎来到 Tennis Life！</p>
-        <p style="color: #88ccff; font-size: 0.95rem;">
-            填写名字和水平即可使用全部功能
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        reg_name = st.text_input("📝 你的名字", placeholder="输入名字或昵称", key="reg_name")
-    
-    with col2:
-        # 水平选项 1.0 - 5.0
-        rating_options = [f"{i/2:.1f}" for i in range(2, 11)]  # 1.0, 1.5, 2.0 ... 5.0
-        reg_rating = st.selectbox("⭐ 水平", rating_options, index=4, key="reg_rating")  # 默认3.0
-    
-    if st.button("🎾 注册并进入", use_container_width=True, key="reg_btn"):
-        if reg_name.strip():
-            rating = float(reg_rating)
-            user = {"name": reg_name.strip(), "rating": rating}
-            
-            # Check if user exists
-            existing = [u['name'].lower() for u in st.session_state.users]
-            if reg_name.strip().lower() not in existing:
-                if CONNECTED:
-                    add_user(users_ws, user)
-                st.session_state.users.append(user)
-            
-            st.session_state.current_user = user
-            st.success(f"✅ 欢迎 {reg_name}！")
-            st.rerun()
-        else:
-            st.warning("⚠️ 请输入名字")
-    
-    st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
-    
-    # Quick login for existing users
-    if st.session_state.users:
-        st.markdown("#### 🔑 已注册用户快速登录")
-        existing_user = st.selectbox("选择用户", ["选择..."] + [u['name'] for u in st.session_state.users], key="quick_login")
-        if existing_user != "选择...":
-            if st.button("🚀 快速登录", use_container_width=True):
-                user = next((u for u in st.session_state.users if u['name'] == existing_user), None)
+    with login_tab:
+        st.markdown("""
+        <div class="register-card">
+            <p style="color: #00ffcc; font-size: 1rem;">👋 已有账号？输入名字和密码登录</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        login_name = st.text_input("📝 名字", placeholder="输入你的名字", key="login_name")
+        login_pwd = st.text_input("🔒 密码", type="password", placeholder="输入密码", key="login_pwd")
+        
+        if st.button("🚀 登录", use_container_width=True, key="login_btn"):
+            if login_name.strip() and login_pwd:
+                user = find_user(st.session_state.users, login_name.strip())
                 if user:
+                    if verify_password(login_pwd, user.get('password_hash', '')):
+                        st.session_state.current_user = user
+                        st.success(f"✅ 欢迎回来，{user['name']}！")
+                        st.rerun()
+                    else:
+                        st.error("❌ 密码错误")
+                else:
+                    st.error("❌ 用户不存在，请先注册")
+            else:
+                st.warning("⚠️ 请输入名字和密码")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # REGISTER TAB
+    # ═══════════════════════════════════════════════════════════════
+    
+    with register_tab:
+        st.markdown("""
+        <div class="register-card">
+            <p style="color: #00ffcc; font-size: 1rem;">🆕 新用户注册</p>
+            <p style="color: #88ccff; font-size: 0.9rem;">设置密码保护你的账号</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        reg_name = st.text_input("📝 名字", placeholder="输入名字或昵称", key="reg_name")
+        
+        col_pwd1, col_pwd2 = st.columns(2)
+        with col_pwd1:
+            reg_pwd = st.text_input("🔒 设置密码", type="password", placeholder="至少4位", key="reg_pwd")
+        with col_pwd2:
+            reg_pwd2 = st.text_input("🔒 确认密码", type="password", placeholder="再次输入", key="reg_pwd2")
+        
+        rating_options = [f"{i/2:.1f}" for i in range(2, 11)]  # 1.0 - 5.0
+        reg_rating = st.selectbox("⭐ 水平 (1.0-5.0)", rating_options, index=4, key="reg_rating")
+        
+        if st.button("🎾 注册", use_container_width=True, key="reg_btn"):
+            if not reg_name.strip():
+                st.warning("⚠️ 请输入名字")
+            elif len(reg_pwd) < 4:
+                st.warning("⚠️ 密码至少4位")
+            elif reg_pwd != reg_pwd2:
+                st.error("❌ 两次密码不一致")
+            elif find_user(st.session_state.users, reg_name.strip()):
+                st.error("❌ 该名字已被注册")
+            else:
+                user = {
+                    "name": reg_name.strip(),
+                    "rating": float(reg_rating),
+                    "password_hash": hash_password(reg_pwd)
+                }
+                
+                if CONNECTED:
+                    if add_user(users_ws, user):
+                        st.session_state.users.append(user)
+                        st.session_state.current_user = user
+                        st.success(f"✅ 注册成功！欢迎 {user['name']}")
+                        st.balloons()
+                        st.rerun()
+                else:
+                    st.session_state.users.append(user)
                     st.session_state.current_user = user
+                    st.success(f"✅ 注册成功 (演示模式)")
                     st.rerun()
 
 else:
@@ -786,11 +884,10 @@ else:
     # 🎮 MAIN APP (LOGGED IN)
     # ═══════════════════════════════════════════════════════════════
     
-    # Welcome message
     st.markdown(f"""
     <div class="welcome-card">
         <p style="color: #00ff88; font-size: 1.2rem; margin: 0;">
-            👋 欢迎回来，<strong>{st.session_state.current_user['name']}</strong>！
+            👋 欢迎，<strong>{st.session_state.current_user['name']}</strong>！
         </p>
         <span class="user-badge">⭐ 水平 {st.session_state.current_user['rating']}</span>
     </div>
@@ -806,13 +903,11 @@ else:
     with tab1:
         st.markdown('<p class="section-header">🏆 分组抽签</p>', unsafe_allow_html=True)
         
-        # Check if current user already in a group
         current_name = st.session_state.current_user['name']
         in_group_a = any(p['name'] == current_name for p in st.session_state.group_a)
         in_group_b = any(p['name'] == current_name for p in st.session_state.group_b)
         in_any_group = in_group_a or in_group_b
         
-        # Join group section
         st.markdown("#### 🎯 加入今日活动")
         
         if in_any_group:
@@ -821,9 +916,7 @@ else:
         else:
             st.markdown(f"""
             <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 10px; margin: 10px 0;">
-                <p style="color: #88ccff; margin: 0;">
-                    根据你的水平 <strong>⭐ {st.session_state.current_user['rating']}</strong>，选择加入：
-                </p>
+                <p style="color: #88ccff; margin: 0;">你的水平：<strong>⭐ {st.session_state.current_user['rating']}</strong></p>
             </div>
             """, unsafe_allow_html=True)
             
@@ -831,16 +924,11 @@ else:
             
             with col_join_a:
                 a_full = len(st.session_state.group_a) >= GROUP_A_LIMIT
-                btn_a_text = f"加入A组 ({len(st.session_state.group_a)}/{GROUP_A_LIMIT})"
                 if a_full:
-                    st.markdown(f'<div style="text-align:center;color:#ff6b6b;">A组已满</div>', unsafe_allow_html=True)
+                    st.markdown('<div style="text-align:center;color:#ff6b6b;">A组已满</div>', unsafe_allow_html=True)
                 else:
-                    if st.button(f"🅰️ {btn_a_text}", use_container_width=True, key="join_a"):
-                        player = {
-                            "name": current_name,
-                            "rating": st.session_state.current_user['rating'],
-                            "group": "A"
-                        }
+                    if st.button(f"🅰️ 加入A组 ({len(st.session_state.group_a)}/{GROUP_A_LIMIT})", use_container_width=True, key="join_a"):
+                        player = {"name": current_name, "rating": st.session_state.current_user['rating'], "group": "A"}
                         if CONNECTED:
                             add_to_group(groups_ws, player, "A")
                         st.session_state.group_a.append(player)
@@ -849,16 +937,11 @@ else:
             
             with col_join_b:
                 b_full = len(st.session_state.group_b) >= GROUP_B_LIMIT
-                btn_b_text = f"加入B组 ({len(st.session_state.group_b)}/{GROUP_B_LIMIT})"
                 if b_full:
-                    st.markdown(f'<div style="text-align:center;color:#ff6b6b;">B组已满</div>', unsafe_allow_html=True)
+                    st.markdown('<div style="text-align:center;color:#ff6b6b;">B组已满</div>', unsafe_allow_html=True)
                 else:
-                    if st.button(f"🅱️ {btn_b_text}", use_container_width=True, key="join_b"):
-                        player = {
-                            "name": current_name,
-                            "rating": st.session_state.current_user['rating'],
-                            "group": "B"
-                        }
+                    if st.button(f"🅱️ 加入B组 ({len(st.session_state.group_b)}/{GROUP_B_LIMIT})", use_container_width=True, key="join_b"):
+                        player = {"name": current_name, "rating": st.session_state.current_user['rating'], "group": "B"}
                         if CONNECTED:
                             add_to_group(groups_ws, player, "B")
                         st.session_state.group_b.append(player)
@@ -872,75 +955,61 @@ else:
         
         with col_a:
             st.markdown('<div class="team-card">', unsafe_allow_html=True)
-            full_badge = f'<span class="group-full">已满</span>' if len(st.session_state.group_a) >= GROUP_A_LIMIT else ""
+            full_badge = '<span class="group-full">已满</span>' if len(st.session_state.group_a) >= GROUP_A_LIMIT else ""
             st.markdown(f'<span class="group-label group-a">A组</span> {full_badge}', unsafe_allow_html=True)
             st.markdown(f"**{len(st.session_state.group_a)}/{GROUP_A_LIMIT}**")
             if st.session_state.group_a:
                 for p in st.session_state.group_a:
-                    highlight = "border: 2px solid #00ff88;" if p['name'] == current_name else ""
-                    st.markdown(f'<div class="player-item" style="{highlight}"><span class="player-item-name">{p["name"]}</span><span class="player-item-rating">⭐{p["rating"]}</span></div>', unsafe_allow_html=True)
+                    hl = "border: 2px solid #00ff88;" if p['name'] == current_name else ""
+                    st.markdown(f'<div class="player-item" style="{hl}"><span class="player-item-name">{p["name"]}</span><span class="player-item-rating">⭐{p["rating"]}</span></div>', unsafe_allow_html=True)
             else:
                 st.markdown("*暂无*")
             st.markdown('</div>', unsafe_allow_html=True)
         
         with col_b:
             st.markdown('<div class="team-card team-card-b">', unsafe_allow_html=True)
-            full_badge = f'<span class="group-full">已满</span>' if len(st.session_state.group_b) >= GROUP_B_LIMIT else ""
+            full_badge = '<span class="group-full">已满</span>' if len(st.session_state.group_b) >= GROUP_B_LIMIT else ""
             st.markdown(f'<span class="group-label group-b">B组</span> {full_badge}', unsafe_allow_html=True)
             st.markdown(f"**{len(st.session_state.group_b)}/{GROUP_B_LIMIT}**")
             if st.session_state.group_b:
                 for p in st.session_state.group_b:
-                    highlight = "border: 2px solid #ff6b35;" if p['name'] == current_name else ""
-                    st.markdown(f'<div class="player-item player-item-b" style="{highlight}"><span class="player-item-name">{p["name"]}</span><span class="player-item-rating">⭐{p["rating"]}</span></div>', unsafe_allow_html=True)
+                    hl = "border: 2px solid #ff6b35;" if p['name'] == current_name else ""
+                    st.markdown(f'<div class="player-item player-item-b" style="{hl}"><span class="player-item-name">{p["name"]}</span><span class="player-item-rating">⭐{p["rating"]}</span></div>', unsafe_allow_html=True)
             else:
                 st.markdown("*暂无*")
             st.markdown('</div>', unsafe_allow_html=True)
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         
-        # Draw section
         st.markdown("#### 🎲 抽签配对")
-        st.markdown("*抽签规则：从A组随机抽1人 + B组随机抽1人 组成一队*")
+        st.markdown("*规则：A组1人 + B组1人 = 一队*")
         
         if st.button("🎾 开始抽签", use_container_width=True, key="draw"):
             if len(st.session_state.group_a) >= 2 and len(st.session_state.group_b) >= 2:
-                # 1A + 1B vs 1A + 1B
                 a = st.session_state.group_a.copy()
                 b = st.session_state.group_b.copy()
                 random.shuffle(a)
                 random.shuffle(b)
-                
                 team1 = [a[0], b[0]]
                 team2 = [a[1], b[1]]
-                
                 st.session_state.current_pairing = {"team1": team1, "team2": team2}
                 st.rerun()
             elif len(st.session_state.group_a) >= 1 and len(st.session_state.group_b) >= 1:
-                # At least 1A + 1B
                 a = st.session_state.group_a.copy()
                 b = st.session_state.group_b.copy()
                 random.shuffle(a)
                 random.shuffle(b)
                 
-                team1 = [a[0], b[0]]
-                
-                # For team2, use remaining or duplicate if needed
-                remaining_a = a[1:] if len(a) > 1 else a
-                remaining_b = b[1:] if len(b) > 1 else b
-                
-                if remaining_a and remaining_b:
-                    team2 = [remaining_a[0], remaining_b[0]]
-                else:
-                    st.warning("⚠️ 人数不足，无法组成两队")
-                    team2 = None
-                
-                if team2:
+                if len(a) >= 2 and len(b) >= 2:
+                    team1 = [a[0], b[0]]
+                    team2 = [a[1], b[1]]
                     st.session_state.current_pairing = {"team1": team1, "team2": team2}
                     st.rerun()
+                else:
+                    st.warning("⚠️ A组B组各至少需要2人")
             else:
-                st.warning("⚠️ A组和B组各至少需要1人")
+                st.warning("⚠️ A组B组各至少需要1人")
         
-        # Show pairing result
         if st.session_state.current_pairing:
             p = st.session_state.current_pairing
             st.markdown("---")
@@ -952,7 +1021,7 @@ else:
                 st.markdown('<div class="team-card"><p class="team-label">TEAM 1</p>', unsafe_allow_html=True)
                 for x in p["team1"]:
                     c = "" if x.get("group") == "A" else " player-name-b"
-                    g = "A" if x.get("group") == "A" else "B"
+                    g = x.get("group", "?")
                     st.markdown(f'<p class="player-name{c}">{x["name"]} <small>({g})</small></p>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
             
@@ -963,7 +1032,7 @@ else:
                 st.markdown('<div class="team-card team-card-b"><p class="team-label">TEAM 2</p>', unsafe_allow_html=True)
                 for x in p["team2"]:
                     c = "" if x.get("group") == "A" else " player-name-b"
-                    g = "A" if x.get("group") == "A" else "B"
+                    g = x.get("group", "?")
                     st.markdown(f'<p class="player-name{c}">{x["name"]} <small>({g})</small></p>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
             
@@ -980,28 +1049,23 @@ else:
         st.markdown('<p class="section-header">📊 战绩记录</p>', unsafe_allow_html=True)
         
         st.markdown("#### ➕ 新增战绩")
-        st.markdown("*可输入未注册的球员名字*")
+        st.markdown("*可输入任意球员名字（包括未注册的）*")
         
         match_date = st.date_input("📅 日期", value=date.today(), key="m_date")
-        
-        # Get all known names for suggestions
-        known_names = list(set([u['name'] for u in st.session_state.users] + 
-                              [p['name'] for p in st.session_state.group_a] + 
-                              [p['name'] for p in st.session_state.group_b]))
         
         st.markdown("**Team 1**")
         c1, c2 = st.columns(2)
         with c1:
             t1p1 = st.text_input("球员1", placeholder="输入名字", key="t1p1")
         with c2:
-            t1p2 = st.text_input("球员2", placeholder="输入名字", key="t1p2")
+            t1p2 = st.text_input("球员2 (可选)", placeholder="输入名字", key="t1p2")
         
         st.markdown("**Team 2**")
         c3, c4 = st.columns(2)
         with c3:
             t2p1 = st.text_input("球员1", placeholder="输入名字", key="t2p1")
         with c4:
-            t2p2 = st.text_input("球员2", placeholder="输入名字", key="t2p2")
+            t2p2 = st.text_input("球员2 (可选)", placeholder="输入名字", key="t2p2")
         
         st.markdown("**比分**")
         sc1, scc, sc2 = st.columns([2, 1, 2])
@@ -1017,9 +1081,9 @@ else:
             team2_n = [x.strip() for x in [t2p1, t2p2] if x.strip()]
             
             if not team1_n or not team2_n:
-                st.warning("⚠️ 每队至少1人")
+                st.warning("⚠️ 每队至少填1人")
             elif not s1 or not s2:
-                st.warning("⚠️ 填写比分")
+                st.warning("⚠️ 请填写比分")
             else:
                 try:
                     score1, score2 = int(s1), int(s2)
@@ -1032,27 +1096,44 @@ else:
                         "net_diff": score1 - score2,
                         "winner": "team1" if score1 > score2 else ("team2" if score2 > score1 else "tie")
                     }
+                    
+                    success = False
                     if CONNECTED:
-                        add_match(matches_ws, match)
-                    st.session_state.matches.append(match)
-                    st.success("✅ 已保存")
-                    st.balloons()
-                except:
+                        success = add_match(matches_ws, match)
+                        if success:
+                            st.session_state.matches.append(match)
+                    else:
+                        st.session_state.matches.append(match)
+                        success = True
+                    
+                    if success:
+                        st.success("✅ 战绩已保存！")
+                        st.balloons()
+                    
+                except ValueError:
                     st.warning("⚠️ 比分须为数字")
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         st.markdown("#### 📋 最近战绩")
         
+        # 每次显示时从服务器重新加载（确保数据最新）
+        if st.button("🔄 刷新战绩列表", use_container_width=True, key="refresh_matches"):
+            if CONNECTED:
+                st.session_state.matches = load_matches(matches_ws)
+            st.rerun()
+        
         if st.session_state.matches:
-            for m in reversed(st.session_state.matches[-10:]):
-                w1 = "🏆" if m['winner'] == 'team1' else ""
-                w2 = "🏆" if m['winner'] == 'team2' else ""
+            for m in reversed(st.session_state.matches[-15:]):
+                w1 = "🏆" if m.get('winner') == 'team1' else ""
+                w2 = "🏆" if m.get('winner') == 'team2' else ""
+                t1_str = " & ".join(m.get('team1', []))
+                t2_str = " & ".join(m.get('team2', []))
                 st.markdown(f'''
                 <div class="match-card">
-                    <div class="match-date">📅 {m['date']}</div>
-                    <div class="match-teams">{w1} {" & ".join(m['team1'])}</div>
-                    <div class="match-score">{m['score1']} : {m['score2']}</div>
-                    <div class="match-teams">{w2} {" & ".join(m['team2'])}</div>
+                    <div class="match-date">📅 {m.get('date', '')}</div>
+                    <div class="match-teams">{w1} {t1_str}</div>
+                    <div class="match-score">{m.get('score1', 0)} : {m.get('score2', 0)}</div>
+                    <div class="match-teams">{w2} {t2_str}</div>
                 </div>
                 ''', unsafe_allow_html=True)
         else:
@@ -1066,7 +1147,6 @@ else:
     with tab3:
         st.markdown('<p class="section-header">😤 复盘吐槽</p>', unsafe_allow_html=True)
         
-        # Author is current user by default
         col_au, col_an = st.columns([3, 1])
         with col_au:
             st.markdown(f"**发布者**: {st.session_state.current_user['name']}")
@@ -1086,9 +1166,9 @@ else:
         
         if st.button("📤 发布", use_container_width=True, key="r_sub"):
             if not content.strip():
-                st.warning("⚠️ 填写内容")
+                st.warning("⚠️ 请填写内容")
             elif rtype == "😤 吐槽搭档" and not target:
-                st.warning("⚠️ 选择吐槽对象")
+                st.warning("⚠️ 请选择吐槽对象")
             else:
                 review = {
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1098,25 +1178,33 @@ else:
                     "target": target if rtype == "😤 吐槽搭档" else "",
                     "content": content
                 }
+                
+                success = False
                 if CONNECTED:
-                    add_review(reviews_ws, review)
-                st.session_state.reviews.append(review)
-                st.success("✅ 已发布")
-                st.rerun()
+                    success = add_review(reviews_ws, review)
+                    if success:
+                        st.session_state.reviews.append(review)
+                else:
+                    st.session_state.reviews.append(review)
+                    success = True
+                
+                if success:
+                    st.success("✅ 已发布！")
+                    st.rerun()
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         st.markdown("#### 📜 吐槽墙")
         
         if st.session_state.reviews:
             for r in reversed(st.session_state.reviews):
-                emoji = r["type"].split()[0] if r["type"] else "💬"
+                emoji = r.get("type", "💬").split()[0] if r.get("type") else "💬"
                 badge = '<span class="anon-badge">匿名</span>' if r.get("is_anonymous") else ""
                 tgt = f" → <strong>{r['target']}</strong>" if r.get("target") else ""
                 st.markdown(f'''
                 <div class="roast-card">
-                    <div class="roast-author">{emoji} {r['author']}{badge}{tgt}</div>
-                    <div class="roast-content">{r['content']}</div>
-                    <div class="roast-time">🕐 {r['date']}</div>
+                    <div class="roast-author">{emoji} {r.get('author', '匿名')}{badge}{tgt}</div>
+                    <div class="roast-content">{r.get('content', '')}</div>
+                    <div class="roast-time">🕐 {r.get('date', '')}</div>
                 </div>
                 ''', unsafe_allow_html=True)
         else:
@@ -1130,13 +1218,21 @@ else:
     with tab4:
         st.markdown('<p class="section-header">📋 完整历史</p>', unsafe_allow_html=True)
         
+        if st.button("🔄 刷新所有数据", use_container_width=True, key="refresh_all"):
+            if CONNECTED:
+                st.session_state.matches = load_matches(matches_ws)
+                st.session_state.reviews = load_reviews(reviews_ws)
+            st.rerun()
+        
         st.markdown("#### 🏆 全部战绩")
         if st.session_state.matches:
             for i, m in enumerate(reversed(st.session_state.matches)):
-                with st.expander(f"📅 {m['date']} | {m['score1']}:{m['score2']}", expanded=(i < 3)):
-                    st.markdown(f"**T1**: {' & '.join(m['team1'])} → {m['score1']}")
-                    st.markdown(f"**T2**: {' & '.join(m['team2'])} → {m['score2']}")
-                    w = "T1🏆" if m['winner'] == 'team1' else ("T2🏆" if m['winner'] == 'team2' else "平局")
+                t1 = ' & '.join(m.get('team1', []))
+                t2 = ' & '.join(m.get('team2', []))
+                with st.expander(f"📅 {m.get('date', '')} | {m.get('score1', 0)}:{m.get('score2', 0)}", expanded=(i < 3)):
+                    st.markdown(f"**T1**: {t1} → {m.get('score1', 0)}")
+                    st.markdown(f"**T2**: {t2} → {m.get('score2', 0)}")
+                    w = "T1🏆" if m.get('winner') == 'team1' else ("T2🏆" if m.get('winner') == 'team2' else "平局")
                     st.markdown(f"**结果**: {w}")
         else:
             st.info("💡 暂无")
@@ -1145,20 +1241,20 @@ else:
         st.markdown("#### 📝 全部吐槽")
         if st.session_state.reviews:
             for i, r in enumerate(reversed(st.session_state.reviews)):
-                with st.expander(f"📅 {r['date']} - {r['type']}", expanded=(i < 3)):
-                    st.markdown(f"**作者**: {r['author']}")
+                with st.expander(f"📅 {r.get('date', '')} - {r.get('type', '')}", expanded=(i < 3)):
+                    st.markdown(f"**作者**: {r.get('author', '')}")
                     if r.get("target"):
                         st.markdown(f"**对象**: {r['target']}")
-                    st.markdown(f"**内容**: {r['content']}")
+                    st.markdown(f"**内容**: {r.get('content', '')}")
         else:
             st.info("💡 暂无")
         
         st.markdown("---")
         if st.session_state.matches or st.session_state.reviews:
             exp = {
-                "users": st.session_state.users,
                 "matches": st.session_state.matches,
-                "reviews": st.session_state.reviews
+                "reviews": st.session_state.reviews,
+                "export_time": datetime.now().strftime("%Y-%m-%d %H:%M")
             }
             st.download_button("📥 导出数据", json.dumps(exp, ensure_ascii=False, indent=2),
                              f"tennis_{datetime.now().strftime('%Y%m%d')}.json", "application/json",
@@ -1173,7 +1269,7 @@ st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
 st.markdown('''
 <div style="text-align:center;padding:10px;color:#88ccff;font-family:'Rajdhani',sans-serif;">
     <span class="tennis-ball">🎾</span>
-    <span style="margin:0 10px;color:#fff;">TENNIS LIFE v6.0</span>
+    <span style="margin:0 10px;color:#fff;">TENNIS LIFE v7.0</span>
     <span class="tennis-ball">🎾</span>
 </div>
 ''', unsafe_allow_html=True)
