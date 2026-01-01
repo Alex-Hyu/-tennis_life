@@ -1,6 +1,6 @@
 """
-🎾 TENNIS LIFE - 网球人生 v9.0
-LeanCloud 后端 - 国内访问友好
+🎾 TENNIS LIFE - 网球人生 v10.0
+Google Sheets 后端 + API缓存优化 + 防跳转
 """
 
 import streamlit as st
@@ -8,7 +8,6 @@ import random
 from datetime import datetime, date
 import json
 import hashlib
-import requests
 
 # ═══════════════════════════════════════════════════════════════════
 # 🔐 PASSWORD UTILS
@@ -22,187 +21,256 @@ def verify_password(password, hashed):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ☁️ LEANCLOUD CONFIG
+# 📊 GOOGLE SHEETS SETUP
 # ═══════════════════════════════════════════════════════════════════
 
-# LeanCloud 配置 - 从 Streamlit Secrets 读取
 try:
-    LC_APP_ID = st.secrets["leancloud"]["app_id"]
-    LC_APP_KEY = st.secrets["leancloud"]["app_key"]
-    LC_API_BASE = st.secrets["leancloud"]["api_base"]
-    LEANCLOUD_CONFIGURED = True
-except:
-    # 备用：直接写入（仅用于测试）
-    LC_APP_ID = "tOm5er9cwr5t9rqVdrVEwDZ9-gzGzoHsz"
-    LC_APP_KEY = "2s4uSgMzqNf6HvGYNR4VitPA"
-    LC_API_BASE = "https://tom5er9c.lc-cn-n1-shared.com"
-    LEANCLOUD_CONFIGURED = True
+    from google.oauth2.service_account import Credentials
+    import gspread
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 
-# API Headers
-LC_HEADERS = {
-    "X-LC-Id": LC_APP_ID,
-    "X-LC-Key": LC_APP_KEY,
-    "Content-Type": "application/json"
-}
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
 
 GROUP_A_LIMIT = 10
 GROUP_B_LIMIT = 10
-CACHE_TTL = 30  # 缓存30秒
+CACHE_TTL = 120  # 缓存2分钟，减少API调用
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ☁️ LEANCLOUD API FUNCTIONS
+# 📊 GOOGLE SHEETS CONNECTION (长期缓存)
 # ═══════════════════════════════════════════════════════════════════
 
-def lc_query(class_name, where=None, limit=1000):
-    """查询 LeanCloud 数据"""
+@st.cache_resource
+def get_google_connection():
+    """获取 Google Sheets 连接（长期缓存，不会重复创建）"""
+    if not GSPREAD_AVAILABLE:
+        return None, None
     try:
-        url = f"{LC_API_BASE}/1.1/classes/{class_name}"
-        params = {"limit": limit}
-        if where:
-            params["where"] = json.dumps(where)
-        resp = requests.get(url, headers=LC_HEADERS, params=params, timeout=10)
-        if resp.status_code == 200:
-            return resp.json().get("results", [])
-        return []
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        sheet_url = st.secrets["sheet_url"]
+        spreadsheet = client.open_by_url(sheet_url)
+        return client, spreadsheet
     except Exception as e:
-        st.error(f"查询失败: {e}")
-        return []
+        return None, None
 
-def lc_create(class_name, data):
-    """创建 LeanCloud 数据"""
+@st.cache_resource
+def get_worksheets(_spreadsheet):
+    """获取所有工作表（长期缓存）"""
+    if not _spreadsheet:
+        return {}
     try:
-        url = f"{LC_API_BASE}/1.1/classes/{class_name}"
-        resp = requests.post(url, headers=LC_HEADERS, json=data, timeout=10)
-        return resp.status_code == 201
-    except Exception as e:
-        st.error(f"保存失败: {e}")
-        return False
-
-def lc_delete(class_name, object_id):
-    """删除 LeanCloud 数据"""
-    try:
-        url = f"{LC_API_BASE}/1.1/classes/{class_name}/{object_id}"
-        resp = requests.delete(url, headers=LC_HEADERS, timeout=10)
-        return resp.status_code == 200
+        ws_names = [ws.title for ws in _spreadsheet.worksheets()]
+        worksheets = {}
+        
+        # Users
+        if "users" not in ws_names:
+            ws = _spreadsheet.add_worksheet(title="users", rows=1000, cols=10)
+            ws.append_row(["name", "rating", "password_hash", "created_at"])
+        worksheets["users"] = _spreadsheet.worksheet("users")
+        
+        # Groups
+        if "groups" not in ws_names:
+            ws = _spreadsheet.add_worksheet(title="groups", rows=500, cols=10)
+            ws.append_row(["name", "rating", "group", "date"])
+        worksheets["groups"] = _spreadsheet.worksheet("groups")
+        
+        # Matches
+        if "matches" not in ws_names:
+            ws = _spreadsheet.add_worksheet(title="matches", rows=2000, cols=15)
+            ws.append_row(["id", "date", "team1", "team2", "score1", "score2", "net_diff", "winner", "created_at"])
+        worksheets["matches"] = _spreadsheet.worksheet("matches")
+        
+        # Reviews
+        if "reviews" not in ws_names:
+            ws = _spreadsheet.add_worksheet(title="reviews", rows=2000, cols=10)
+            ws.append_row(["id", "date", "author", "is_anonymous", "type", "target", "content"])
+        worksheets["reviews"] = _spreadsheet.worksheet("reviews")
+        
+        return worksheets
     except:
-        return False
+        return {}
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 📊 DATA FUNCTIONS WITH CACHING
+# 📊 CACHED DATA LOADING (核心优化！)
 # ═══════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=CACHE_TTL)
-def load_users():
-    """加载所有用户"""
-    results = lc_query("users")
-    return [{
-        "id": r.get("objectId", ""),
-        "name": str(r.get("name", "")),
-        "rating": float(r.get("rating", 3.0)),
-        "password_hash": str(r.get("password_hash", ""))
-    } for r in results if r.get("name")]
+def load_users_data():
+    """加载用户数据（缓存2分钟）"""
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return []
+    try:
+        ws = spreadsheet.worksheet("users")
+        records = ws.get_all_records()
+        return [{
+            "name": str(r.get('name', '')),
+            "rating": float(r.get('rating', 3.0)) if r.get('rating') else 3.0,
+            "password_hash": str(r.get('password_hash', ''))
+        } for r in records if r.get('name')]
+    except:
+        return []
 
 @st.cache_data(ttl=CACHE_TTL)
-def load_today_groups(_today):
-    """加载今日分组"""
-    results = lc_query("groups", {"date": _today})
-    group_a, group_b = [], []
-    for r in results:
-        player = {
-            "id": r.get("objectId", ""),
-            "name": str(r.get("name", "")),
-            "rating": float(r.get("rating", 3.0)),
-            "group": str(r.get("group", "B"))
-        }
-        if player["group"] == "A":
-            group_a.append(player)
-        else:
-            group_b.append(player)
-    return group_a, group_b
+def load_groups_data(_today):
+    """加载今日分组（缓存2分钟）"""
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return [], []
+    try:
+        ws = spreadsheet.worksheet("groups")
+        records = ws.get_all_records()
+        group_a, group_b = [], []
+        for r in records:
+            if str(r.get('date', '')) == _today and r.get('name'):
+                player = {
+                    "name": str(r.get('name', '')),
+                    "rating": float(r.get('rating', 3.0)) if r.get('rating') else 3.0,
+                    "group": str(r.get('group', 'B'))
+                }
+                if player['group'] == 'A':
+                    group_a.append(player)
+                else:
+                    group_b.append(player)
+        return group_a, group_b
+    except:
+        return [], []
 
 @st.cache_data(ttl=CACHE_TTL)
-def load_matches():
-    """加载战绩"""
-    results = lc_query("matches")
-    matches = []
-    for r in results:
-        matches.append({
-            "id": r.get("objectId", ""),
-            "date": str(r.get("date", "")),
-            "team1": r.get("team1", []),
-            "team2": r.get("team2", []),
-            "score1": int(r.get("score1", 0)),
-            "score2": int(r.get("score2", 0)),
-            "winner": str(r.get("winner", "tie")),
-            "created_at": r.get("createdAt", "")
-        })
-    # 按创建时间排序
-    matches.sort(key=lambda x: x.get("created_at", ""), reverse=False)
-    return matches
+def load_matches_data():
+    """加载战绩（缓存2分钟）"""
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return []
+    try:
+        ws = spreadsheet.worksheet("matches")
+        records = ws.get_all_records()
+        matches = []
+        for r in records:
+            if r.get('team1') and r.get('team2'):
+                matches.append({
+                    "id": str(r.get('id', '')),
+                    "date": str(r.get('date', '')),
+                    "team1": str(r.get('team1', '')).split(','),
+                    "team2": str(r.get('team2', '')).split(','),
+                    "score1": int(r.get('score1', 0)) if str(r.get('score1', '')).lstrip('-').isdigit() else 0,
+                    "score2": int(r.get('score2', 0)) if str(r.get('score2', '')).lstrip('-').isdigit() else 0,
+                    "winner": str(r.get('winner', 'tie'))
+                })
+        return matches
+    except:
+        return []
 
 @st.cache_data(ttl=CACHE_TTL)
-def load_reviews():
-    """加载吐槽"""
-    results = lc_query("reviews")
-    reviews = []
-    for r in results:
-        reviews.append({
-            "id": r.get("objectId", ""),
-            "date": str(r.get("date", "")),
-            "author": str(r.get("author", "匿名")),
-            "is_anonymous": r.get("is_anonymous", False),
-            "type": str(r.get("type", "")),
-            "target": str(r.get("target", "")),
-            "content": str(r.get("content", "")),
-            "created_at": r.get("createdAt", "")
-        })
-    reviews.sort(key=lambda x: x.get("created_at", ""), reverse=False)
-    return reviews
+def load_reviews_data():
+    """加载吐槽（缓存2分钟）"""
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return []
+    try:
+        ws = spreadsheet.worksheet("reviews")
+        records = ws.get_all_records()
+        return [{
+            "id": str(r.get('id', '')),
+            "date": str(r.get('date', '')),
+            "author": str(r.get('author', '匿名')),
+            "is_anonymous": str(r.get('is_anonymous', '')).upper() == 'TRUE',
+            "type": str(r.get('type', '')),
+            "target": str(r.get('target', '')),
+            "content": str(r.get('content', ''))
+        } for r in records if r.get('content')]
+    except:
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 📝 WRITE FUNCTIONS
+# 📝 WRITE FUNCTIONS (写入后清除缓存)
 # ═══════════════════════════════════════════════════════════════════
 
 def add_user(name, rating, password_hash):
     """添加用户"""
-    success = lc_create("users", {
-        "name": name,
-        "rating": rating,
-        "password_hash": password_hash
-    })
-    if success:
-        load_users.clear()
-    return success
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return False
+    try:
+        ws = spreadsheet.worksheet("users")
+        ws.append_row([name, rating, password_hash, datetime.now().strftime("%Y-%m-%d %H:%M")])
+        load_users_data.clear()  # 清除缓存
+        return True
+    except Exception as e:
+        st.error(f"注册失败: {e}")
+        return False
 
 def add_to_group(name, rating, group):
     """加入分组"""
-    today = date.today().strftime("%Y-%m-%d")
-    success = lc_create("groups", {
-        "name": name,
-        "rating": rating,
-        "group": group,
-        "date": today
-    })
-    if success:
-        load_today_groups.clear()
-    return success
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return False
+    try:
+        ws = spreadsheet.worksheet("groups")
+        today = date.today().strftime("%Y-%m-%d")
+        ws.append_row([name, rating, group, today])
+        load_groups_data.clear()  # 清除缓存
+        return True
+    except Exception as e:
+        st.error(f"加入失败: {e}")
+        return False
 
 def add_match(match_data):
     """添加战绩"""
-    success = lc_create("matches", match_data)
-    if success:
-        load_matches.clear()
-    return success
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return False
+    try:
+        ws = spreadsheet.worksheet("matches")
+        match_id = datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(100, 999))
+        ws.append_row([
+            match_id,
+            match_data['date'],
+            ','.join(match_data['team1']),
+            ','.join(match_data['team2']),
+            match_data['score1'],
+            match_data['score2'],
+            match_data['score1'] - match_data['score2'],
+            match_data['winner'],
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ])
+        load_matches_data.clear()  # 清除缓存
+        return True
+    except Exception as e:
+        st.error(f"保存失败: {e}")
+        return False
 
 def add_review(review_data):
     """添加吐槽"""
-    success = lc_create("reviews", review_data)
-    if success:
-        load_reviews.clear()
-    return success
+    _, spreadsheet = get_google_connection()
+    if not spreadsheet:
+        return False
+    try:
+        ws = spreadsheet.worksheet("reviews")
+        review_id = datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(100, 999))
+        ws.append_row([
+            review_id,
+            review_data['date'],
+            review_data['author'],
+            'TRUE' if review_data['is_anonymous'] else 'FALSE',
+            review_data['type'],
+            review_data['target'],
+            review_data['content']
+        ])
+        load_reviews_data.clear()  # 清除缓存
+        return True
+    except Exception as e:
+        st.error(f"发布失败: {e}")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -312,13 +380,8 @@ st.markdown("""
     }
     
     .player-item-b { border-left-color: #ff6b35; }
-    
     .player-item-name { font-family: 'Rajdhani', sans-serif; font-size: 1.1rem; font-weight: 600; color: #ffffff; }
-    
-    .player-item-rating {
-        font-family: 'Orbitron', monospace; font-size: 0.85rem; color: #00d4ff;
-        background: rgba(0, 212, 255, 0.2); padding: 4px 10px; border-radius: 20px;
-    }
+    .player-item-rating { font-family: 'Orbitron', monospace; font-size: 0.85rem; color: #00d4ff; background: rgba(0, 212, 255, 0.2); padding: 4px 10px; border-radius: 20px; }
     
     .group-label {
         font-family: 'Orbitron', monospace;
@@ -452,22 +515,24 @@ st.markdown("""
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 🔌 LOAD DATA
+# 🔌 INITIALIZE
 # ═══════════════════════════════════════════════════════════════════
 
+_, spreadsheet = get_google_connection()
+CONNECTED = spreadsheet is not None
 TODAY = date.today().strftime("%Y-%m-%d")
 
-# Initialize session state
+# Session state
 if 'current_user' not in st.session_state:
     st.session_state.current_user = None
 if 'current_pairing' not in st.session_state:
     st.session_state.current_pairing = None
 
-# Load data
-users = load_users()
-group_a, group_b = load_today_groups(TODAY)
-matches = load_matches()
-reviews = load_reviews()
+# Load data (使用缓存，不会每次都调用API)
+users = load_users_data() if CONNECTED else []
+group_a, group_b = load_groups_data(TODAY) if CONNECTED else ([], [])
+matches = load_matches_data() if CONNECTED else []
+reviews = load_reviews_data() if CONNECTED else []
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -478,10 +543,10 @@ st.markdown('<h1 class="main-title">🎾 TENNIS LIFE</h1>', unsafe_allow_html=Tr
 st.markdown('<p class="subtitle">网球人生 · 双打配对</p>', unsafe_allow_html=True)
 st.markdown(f'<div style="text-align: center;"><span class="date-badge">📅 {datetime.now().strftime("%Y年%m月%d日")}</span></div>', unsafe_allow_html=True)
 
-if LEANCLOUD_CONFIGURED:
-    st.markdown('<div style="text-align:center;color:#00ff88;font-size:0.75rem;">✅ LeanCloud 已连接</div>', unsafe_allow_html=True)
+if CONNECTED:
+    st.markdown('<div style="text-align:center;color:#00ff88;font-size:0.75rem;">✅ 已连接</div>', unsafe_allow_html=True)
 else:
-    st.markdown('<div style="text-align:center;color:#ff6b35;font-size:0.75rem;">⚠️ 未配置</div>', unsafe_allow_html=True)
+    st.markdown('<div style="text-align:center;color:#ff6b35;font-size:0.75rem;">⚠️ 未连接</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
 
@@ -507,14 +572,13 @@ with st.sidebar:
     st.markdown(f"**A组**: {len(group_a)}/{GROUP_A_LIMIT}")
     st.markdown(f"**B组**: {len(group_b)}/{GROUP_B_LIMIT}")
     st.markdown(f"**战绩**: {len(matches)} 场")
-    st.markdown(f"**吐槽**: {len(reviews)} 条")
     
     st.markdown("---")
-    if st.button("🔄 刷新", use_container_width=True):
-        load_users.clear()
-        load_today_groups.clear()
-        load_matches.clear()
-        load_reviews.clear()
+    if st.button("🔄 刷新数据", use_container_width=True):
+        load_users_data.clear()
+        load_groups_data.clear()
+        load_matches_data.clear()
+        load_reviews_data.clear()
         st.rerun()
 
 
@@ -539,12 +603,11 @@ if st.session_state.current_user is None:
                 if user:
                     if verify_password(login_pwd, user.get('password_hash', '')):
                         st.session_state.current_user = user
-                        st.session_state.just_logged_in = True
                         st.rerun()
                     else:
                         st.error("❌ 密码错误")
                 else:
-                    st.error("❌ 用户不存在")
+                    st.error("❌ 用户不存在，请先注册")
             else:
                 st.warning("⚠️ 请输入名字和密码")
     
@@ -578,7 +641,6 @@ if st.session_state.current_user is None:
                         "rating": float(reg_rating),
                         "password_hash": pwd_hash
                     }
-                    st.session_state.just_logged_in = True
                     st.balloons()
                     st.rerun()
 
@@ -593,11 +655,6 @@ else:
         <span class="user-badge">⭐ {st.session_state.current_user['rating']}</span>
     </div>
     ''', unsafe_allow_html=True)
-    
-    # 显示登录成功消息
-    if st.session_state.get('just_logged_in'):
-        st.success(f"✅ 欢迎回来，{st.session_state.current_user['name']}！")
-        st.session_state.just_logged_in = False
     
     tab1, tab2, tab3, tab4 = st.tabs(["🏆 分组抽签", "📊 战绩", "😤 吐槽", "📋 历史"])
     
@@ -623,14 +680,16 @@ else:
                     st.markdown('<div style="text-align:center;color:#ff6b6b;">A组已满</div>', unsafe_allow_html=True)
                 elif st.button(f"🅰️ A组 ({len(group_a)}/{GROUP_A_LIMIT})", key="join_a"):
                     if add_to_group(current_name, st.session_state.current_user['rating'], "A"):
-                        st.success("✅ 已加入A组，请刷新查看")
+                        st.success("✅ 已加入A组")
+                        st.rerun()
             
             with col_b:
                 if len(group_b) >= GROUP_B_LIMIT:
                     st.markdown('<div style="text-align:center;color:#ff6b6b;">B组已满</div>', unsafe_allow_html=True)
                 elif st.button(f"🅱️ B组 ({len(group_b)}/{GROUP_B_LIMIT})", key="join_b"):
                     if add_to_group(current_name, st.session_state.current_user['rating'], "B"):
-                        st.success("✅ 已加入B组，请刷新查看")
+                        st.success("✅ 已加入B组")
+                        st.rerun()
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         
@@ -689,6 +748,7 @@ else:
             
             if st.button("🔄 重抽", key="redraw"):
                 st.session_state.current_pairing = None
+                st.rerun()
     
     # ═══════════════════════════════════════════════════════════════
     # TAB 2: 战绩
@@ -742,7 +802,7 @@ else:
                         "winner": "team1" if score1 > score2 else ("team2" if score2 > score1 else "tie")
                     }
                     if add_match(match_data):
-                        st.success("✅ 已保存！点击侧边栏刷新查看")
+                        st.success("✅ 已保存")
                         st.balloons()
                 except:
                     st.warning("⚠️ 比分须为数字")
@@ -765,7 +825,7 @@ else:
             ''', unsafe_allow_html=True)
         
         if not matches:
-            st.info("💡 暂无")
+            st.info("💡 暂无战绩")
     
     # ═══════════════════════════════════════════════════════════════
     # TAB 3: 吐槽
@@ -806,7 +866,8 @@ else:
                     "content": content
                 }
                 if add_review(review_data):
-                    st.success("✅ 已发布！点击侧边栏刷新查看")
+                    st.success("✅ 已发布")
+                    st.rerun()
         
         st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
         st.markdown("#### 📜 吐槽墙")
@@ -824,7 +885,7 @@ else:
             ''', unsafe_allow_html=True)
         
         if not reviews:
-            st.info("💡 暂无")
+            st.info("💡 暂无吐槽")
     
     # ═══════════════════════════════════════════════════════════════
     # TAB 4: 历史
@@ -833,7 +894,7 @@ else:
     with tab4:
         st.markdown('<p class="section-header">📋 历史记录</p>', unsafe_allow_html=True)
         
-        st.markdown("#### 🏆 战绩")
+        st.markdown("#### 🏆 全部战绩")
         for i, m in enumerate(reversed(matches)):
             with st.expander(f"📅 {m.get('date', '')} | {m.get('score1', 0)}:{m.get('score2', 0)}", expanded=(i < 3)):
                 st.markdown(f"**T1**: {' & '.join(m.get('team1', []))} → {m.get('score1', 0)}")
@@ -843,7 +904,7 @@ else:
             st.info("💡 暂无")
         
         st.markdown("---")
-        st.markdown("#### 📝 吐槽")
+        st.markdown("#### 📝 全部吐槽")
         for i, r in enumerate(reversed(reviews)):
             with st.expander(f"📅 {r.get('date', '')} - {r.get('type', '')}", expanded=(i < 3)):
                 st.markdown(f"**作者**: {r.get('author', '')}")
@@ -858,4 +919,4 @@ else:
 # ═══════════════════════════════════════════════════════════════════
 
 st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
-st.markdown('<div style="text-align:center;padding:10px;color:#88ccff;"><span class="tennis-ball">🎾</span> <span style="color:#fff;">TENNIS LIFE v9.0</span> <span class="tennis-ball">🎾</span></div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align:center;padding:10px;color:#88ccff;"><span class="tennis-ball">🎾</span> <span style="color:#fff;">TENNIS LIFE v10</span> <span class="tennis-ball">🎾</span></div>', unsafe_allow_html=True)
