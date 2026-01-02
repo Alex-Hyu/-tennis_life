@@ -107,19 +107,30 @@ def load_users_data():
     """加载用户数据"""
     _, spreadsheet = get_google_connection()
     if not spreadsheet:
-        st.error("❌ 无法连接到 Google Sheets")
         return []
     try:
         ws = spreadsheet.worksheet("users")
-        records = ws.get_all_records()
-        users = [{
-            "name": str(r.get('name', '')),
-            "rating": float(r.get('rating', 3.0)) if r.get('rating') else 3.0,
-            "password_hash": str(r.get('password_hash', ''))
-        } for r in records if r.get('name')]
+        # 尝试直接获取所有值，而不是 get_all_records
+        all_values = ws.get_all_values()
+        
+        if len(all_values) <= 1:  # 只有表头或空
+            return []
+        
+        # 手动解析：第一行是表头
+        headers = all_values[0]
+        users = []
+        
+        for row in all_values[1:]:
+            if len(row) >= 3 and row[0]:  # 至少有 name, rating, password_hash
+                users.append({
+                    "name": str(row[0]),
+                    "rating": float(row[1]) if row[1] else 3.0,
+                    "password_hash": str(row[2]) if len(row) > 2 else ""
+                })
+        
         return users
     except Exception as e:
-        st.error(f"❌ 读取用户数据失败: {e}")
+        st.error(f"❌ 读取用户失败: {e}")
         return []
 
 @st.cache_data(ttl=CACHE_TTL)
@@ -536,6 +547,15 @@ users = load_users_data() if CONNECTED else []
 group_a, group_b = load_groups_data(TODAY) if CONNECTED else ([], [])
 matches = load_matches_data() if CONNECTED else []
 reviews = load_reviews_data() if CONNECTED else []
+
+# 调试：显示加载状态
+if CONNECTED:
+    with st.sidebar:
+        with st.expander("🔧 调试信息"):
+            st.write(f"用户数: {len(users)}")
+            st.write(f"用户列表: {[u['name'] for u in users]}")
+            if users:
+                st.write(f"第一个用户: {users[0]}")
 
 
 # ═══════════════════════════════════════════════════════════════════
