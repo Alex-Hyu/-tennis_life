@@ -38,7 +38,7 @@ SCOPES = [
 
 GROUP_A_LIMIT = 10
 GROUP_B_LIMIT = 10
-CACHE_TTL = 120  # 缓存2分钟，减少API调用
+CACHE_TTL = 30  # 缓存30秒，平衡API调用和数据同步
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -594,6 +594,11 @@ if st.session_state.current_user is None:
     with login_tab:
         st.markdown('<div class="register-card"><p style="color: #00ffcc;">👋 输入名字和密码登录</p></div>', unsafe_allow_html=True)
         
+        # 刷新按钮 - 解决跨设备同步问题
+        if st.button("🔄 刷新用户列表", key="refresh_users"):
+            load_users_data.clear()
+            st.rerun()
+        
         login_name = st.text_input("📝 名字", key="login_name")
         login_pwd = st.text_input("🔒 密码", type="password", key="login_pwd")
         
@@ -655,6 +660,13 @@ else:
         <span class="user-badge">⭐ {st.session_state.current_user['rating']}</span>
     </div>
     ''', unsafe_allow_html=True)
+    
+    # 登出按钮放在主界面，手机上更容易看到
+    col_spacer, col_logout = st.columns([3, 1])
+    with col_logout:
+        if st.button("🚪 登出", key="logout_main"):
+            st.session_state.current_user = None
+            st.rerun()
     
     tab1, tab2, tab3, tab4 = st.tabs(["🏆 分组抽签", "📊 战绩", "😤 吐槽", "📋 历史"])
     
