@@ -604,15 +604,30 @@ if st.session_state.current_user is None:
         
         if st.button("🚀 登录", key="login_btn"):
             if login_name.strip() and login_pwd:
+                # 强制刷新缓存再登录
+                load_users_data.clear()
+                users = load_users_data()
+                
                 user = next((u for u in users if u['name'].lower() == login_name.strip().lower()), None)
                 if user:
-                    if verify_password(login_pwd, user.get('password_hash', '')):
+                    # 调试信息
+                    input_hash = hash_password(login_pwd)
+                    stored_hash = user.get('password_hash', '')
+                    
+                    if verify_password(login_pwd, stored_hash):
                         st.session_state.current_user = user
                         st.rerun()
                     else:
-                        st.error("❌ 密码错误")
+                        st.error(f"❌ 密码错误")
+                        # 显示调试信息帮助排查
+                        with st.expander("🔍 调试信息"):
+                            st.write(f"输入密码哈希: {input_hash}")
+                            st.write(f"存储密码哈希: {stored_hash}")
+                            st.write(f"哈希长度: 输入={len(input_hash)}, 存储={len(stored_hash)}")
                 else:
                     st.error("❌ 用户不存在，请先注册")
+                    with st.expander("🔍 调试信息 - 已注册用户"):
+                        st.write([u['name'] for u in users])
             else:
                 st.warning("⚠️ 请输入名字和密码")
     
