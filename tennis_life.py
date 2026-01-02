@@ -104,19 +104,22 @@ def get_worksheets(_spreadsheet):
 
 @st.cache_data(ttl=CACHE_TTL)
 def load_users_data():
-    """加载用户数据（缓存2分钟）"""
+    """加载用户数据"""
     _, spreadsheet = get_google_connection()
     if not spreadsheet:
+        st.error("❌ 无法连接到 Google Sheets")
         return []
     try:
         ws = spreadsheet.worksheet("users")
         records = ws.get_all_records()
-        return [{
+        users = [{
             "name": str(r.get('name', '')),
             "rating": float(r.get('rating', 3.0)) if r.get('rating') else 3.0,
             "password_hash": str(r.get('password_hash', ''))
         } for r in records if r.get('name')]
-    except:
+        return users
+    except Exception as e:
+        st.error(f"❌ 读取用户数据失败: {e}")
         return []
 
 @st.cache_data(ttl=CACHE_TTL)
